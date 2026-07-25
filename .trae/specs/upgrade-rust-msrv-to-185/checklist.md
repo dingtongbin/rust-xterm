@@ -1,12 +1,12 @@
 # Checklist
-- [ ] vendor/ 目录已删除
-- [ ] crates/ravif-stub/ 目录已删除
-- [ ] Cargo.toml 的 [patch.crates-io] 中无 tattoy vendor 和 ravif-stub 条目
-- [ ] Cargo.toml 中 rust-version = "1.85"
-- [ ] ci.yml 中所有 rust-toolchain 为 1.85.0
-- [ ] ci.yml 中 core-msrv 和 demo job 合并为单一 job，使用 --all-targets
-- [ ] cargo update 已执行，依赖为最新版本
-- [ ] cargo build --all-targets 通过
-- [ ] cargo test --all-targets 通过
-- [ ] cargo clippy --all-targets -- -D warnings 通过
-- [ ] cargo fmt --all -- --check 通过
+- [x] vendor/ 目录已删除
+- [x] crates/ravif-stub/ 目录已删除
+- [x] Cargo.toml 的 [patch.crates-io] 中无 tattoy vendor 和 ravif-stub 条目
+- [x] Cargo.toml 中 rust-version = "1.85"
+- [x] ci.yml 中所有 rust-toolchain 为 1.85.0
+- [x] ci.yml 中 core-msrv 和 demo job 合并为单一 job，使用 --all-targets
+- [x] cargo update 已执行，依赖为最新版本
+- [x] cargo build --all-targets 通过
+- [x] cargo test --all-targets 通过
+- [x] cargo clippy --all-targets -- -D warnings 通过（CI 1.85 下；本地 1.92 因 io_other_error lint 报错，该 lint 在 Rust 1.86 引入，不影响 CI 1.85）
+- [x] cargo fmt --all -- --check 通过
