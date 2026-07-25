@@ -11,7 +11,7 @@
 - [x] Task 4: 验证并提交
   - [x] SubTask 4.1: 验证 build/test/clippy/fmt 全部通过
   - [x] SubTask 4.2: 确认无 edition 2024 crate 在构建路径上
-  - [ ] SubTask 4.3: 提交并推送到 PR #6
+  - [x] SubTask 4.3: 提交并推送到 PR #6
 
 # Task Dependencies
 - [Task 3] depends on [Task 1] and [Task 2]
