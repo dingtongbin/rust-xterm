@@ -15,9 +15,9 @@ use rust_xterm_core::{
     integration::RenderSurface, Addon, AddonContext, Buffer, BufferNamespace, BufferType,
     CellFlags, Codec, CodecGate, CodecStats, Color, CursorMeta, CursorShape, DamageTracker,
     DirtyRect, DirtyRow, EventBus, EventSubscription, FrameUpdate, Marker, NullRenderSurface,
-    NullWriter, Parser, RenderMetrics, RuntimeState, RustXtermCell, RustXtermConfig, RustXtermConfigBuilder,
-    ScreenSnapshot, TerminalEvent, TerminalManager, TerminalSize, WezTermCore,
-    WindowsTerminalTheme,
+    NullWriter, Parser, RenderMetrics, RuntimeState, RustXtermCell, RustXtermConfig,
+    RustXtermConfigBuilder, ScreenSnapshot, TerminalEvent, TerminalManager, TerminalSize,
+    WezTermCore, WindowsTerminalTheme,
 };
 use rust_xterm_host::{Event, EventLoop, EventLoopConfig, PtyBridge, PtyConfig, PtyError};
 use rust_xterm_renderer::{

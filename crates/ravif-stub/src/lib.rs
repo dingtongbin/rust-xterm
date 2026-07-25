@@ -149,14 +149,18 @@ impl<'exif_slice> Encoder<'exif_slice> {
     ///
     /// 桩实现：恒返回 `Err`。rust-xterm/wezterm-term 从不调用此方法。
     pub fn encode_rgba(&self, _in_buffer: Img<&[RGBA8]>) -> Result<EncodedImage, Error> {
-        Err(Error::Unsupported("ravif stub: AVIF encoding not available"))
+        Err(Error::Unsupported(
+            "ravif stub: AVIF encoding not available",
+        ))
     }
 
     /// 编码 RGB 图像
     ///
     /// 桩实现：恒返回 `Err`。rust-xterm/wezterm-term 从不调用此方法。
     pub fn encode_rgb(&self, _buffer: Img<&[RGB8]>) -> Result<EncodedImage, Error> {
-        Err(Error::Unsupported("ravif stub: AVIF encoding not available"))
+        Err(Error::Unsupported(
+            "ravif stub: AVIF encoding not available",
+        ))
     }
 
     /// 直接编码 8 位平面（上游 API 兼容）
@@ -169,7 +173,9 @@ impl<'exif_slice> Encoder<'exif_slice> {
         _v: &[u8],
         _a: Option<&[u8]>,
     ) -> Result<EncodedImage, Error> {
-        Err(Error::Unsupported("ravif stub: AVIF encoding not available"))
+        Err(Error::Unsupported(
+            "ravif stub: AVIF encoding not available",
+        ))
     }
 
     /// 直接编码 10 位平面（上游 API 兼容）
@@ -182,7 +188,9 @@ impl<'exif_slice> Encoder<'exif_slice> {
         _v: &[u16],
         _a: Option<&[u16]>,
     ) -> Result<EncodedImage, Error> {
-        Err(Error::Unsupported("ravif stub: AVIF encoding not available"))
+        Err(Error::Unsupported(
+            "ravif stub: AVIF encoding not available",
+        ))
     }
 }
 
