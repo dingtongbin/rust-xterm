@@ -11,7 +11,6 @@ members = [
     "crates/rust-xterm-core",
     "crates/rust-xterm-renderer",
     "crates/rust-xterm-host",
-    "crates/ravif-stub",
 ]
 
 # -----------------------------------------------------------------------------
@@ -80,20 +79,3 @@ overflow-checks = true
 opt-level = 1
 debug = false
 overflow-checks = true
-
-# -----------------------------------------------------------------------------
-# MSRV 补丁：用本地桩替换 edition 2024 的 ravif 0.13.0
-# -----------------------------------------------------------------------------
-# tattoy-wezterm-term 依赖 image = "0.25"（未关 default features），
-# 导致 image 的 `avif` feature 被启用，传递拉入 ravif 0.13.0
-# （rust-version = "1.85"，edition 2024），无法在 rust-xterm 锁定的
-# Rust 1.72 MSRV 下编译。
-#
-# wezterm-term 只用 image::RgbaImage / image::imageops 处理 sixel/iterm2
-# 图像协议，从不进行 AVIF 编码，因此用本地 ravif-stub（API 表面与
-# 上游 0.13.0 完全一致，encode_* 恒返回 Err）替换之。详见
-# crates/ravif-stub/Cargo.toml 的注释。
-[patch.crates-io]
-ravif = { path = "crates/ravif-stub" }
-tattoy-wezterm-escape-parser = { path = "vendor/tattoy-wezterm-escape-parser" }
-tattoy-wezterm-cell = { path = "vendor/tattoy-wezterm-cell" }

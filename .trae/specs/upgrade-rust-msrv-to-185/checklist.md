@@ -1,0 +1,12 @@
+# Checklist
+- [ ] vendor/ 目录已删除
+- [ ] crates/ravif-stub/ 目录已删除
+- [ ] Cargo.toml 的 [patch.crates-io] 中无 tattoy vendor 和 ravif-stub 条目
+- [ ] Cargo.toml 中 rust-version = "1.85"
+- [ ] ci.yml 中所有 rust-toolchain 为 1.85.0
+- [ ] ci.yml 中 core-msrv 和 demo job 合并为单一 job，使用 --all-targets
+- [ ] cargo update 已执行，依赖为最新版本
+- [ ] cargo build --all-targets 通过
+- [ ] cargo test --all-targets 通过
+- [ ] cargo clippy --all-targets -- -D warnings 通过
+- [ ] cargo fmt --all -- --check 通过
