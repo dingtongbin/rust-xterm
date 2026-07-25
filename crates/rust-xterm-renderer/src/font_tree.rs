@@ -16,9 +16,18 @@
 //! 3. 若所有字体都不包含，使用 `.notdef` 字形（通常是方块）
 
 use fontdb::{Database, Family, Query, Style, Weight, ID};
+use lru::LruCache;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 use swash::scale::ScaleContext;
 use swash::{Charmap, FontRef, GlyphId};
+
+/// 字形缓存硬上限
+///
+/// 防止渲染大量不同字符时 `glyph_cache` 无界增长。
+/// 8192 足以覆盖绝大多数终端会话中出现的字符集。
+const GLYPH_CACHE_CAPACITY: usize = 8192;
 
 /// 字体面信息
 #[derive(Debug, Clone)]
@@ -54,12 +63,15 @@ pub struct FontTree {
     primary_id: Option<ID>,
     /// 回退字体 ID 列表
     fallback_ids: Vec<ID>,
-    /// 字形缓存：char -> GlyphInfo
-    glyph_cache: HashMap<char, GlyphInfo>,
+    /// 字形缓存：char -> GlyphInfo（LRU 有界，硬上限 GLYPH_CACHE_CAPACITY）
+    glyph_cache: LruCache<char, GlyphInfo>,
     /// swash 缩放上下文
     scale_context: ScaleContext,
     /// 字体数据缓存（避免重复解析）
-    font_data_cache: HashMap<ID, Vec<u8>>,
+    ///
+    /// 使用 `Arc<[u8]>` 共享字体文件字节，避免每个调用方都 clone 整份字体数据。
+    /// `Arc` clone 是廉价的引用计数 clone，不复制底层字节。
+    font_data_cache: HashMap<ID, Arc<[u8]>>,
 }
 
 impl FontTree {
@@ -97,7 +109,7 @@ impl FontTree {
             db,
             primary_id,
             fallback_ids,
-            glyph_cache: HashMap::new(),
+            glyph_cache: LruCache::new(NonZeroUsize::new(GLYPH_CACHE_CAPACITY).unwrap()),
             scale_context: ScaleContext::new(),
             font_data_cache: HashMap::new(),
         }
@@ -150,25 +162,58 @@ impl FontTree {
     /// 查找字符对应的字形
     ///
     /// 遍历主字体 + 回退链，返回第一个包含该字符的字体中的字形 ID。
-    pub fn lookup_glyph(&mut self, ch: char) -> Option<GlyphInfo> {
-        // 先查缓存
+    ///
+    /// # 参数
+    ///
+    /// - `ch`：待查找的字符
+    /// - `width`：字符显示宽度（来自 `cell.width`，WezTerm 权威宽度表），
+    ///   用于填充 `GlyphInfo.advance`
+    /// - `is_color`：是否按彩色字形处理（由调用方根据 cell flags 等提示判定）
+    ///
+    /// # 返回
+    ///
+    /// - 若某字体包含该字符，返回对应字形的 `GlyphInfo`
+    /// - 若所有字体都 miss，但有主字体，返回主字体的 `.notdef` 字形
+    ///   （`glyph_id == 0`），由渲染层画方块
+    /// - 若没有主字体，返回 `None`
+    pub fn lookup_glyph(&mut self, ch: char, width: usize, is_color: bool) -> Option<GlyphInfo> {
+        // 先查缓存（LruCache::get 需要 &mut self 以更新 LRU 顺序）
         if let Some(info) = self.glyph_cache.get(&ch) {
             return Some(*info);
         }
 
         let ids = self.all_ids();
         for (face_index, &id) in ids.iter().enumerate() {
-            if let Some(info) = self.lookup_in_face(id, face_index, ch) {
-                self.glyph_cache.insert(ch, info);
+            if let Some(info) = self.lookup_in_face(id, face_index, ch, width, is_color) {
+                self.glyph_cache.put(ch, info);
                 return Some(info);
             }
         }
 
-        None
+        // 所有字体都 miss：返回主字体的 .notdef 字形（glyph_id == 0），
+        // 由渲染层画方块。如果没有主字体，则返回 None。
+        self.primary_id?;
+        let info = GlyphInfo {
+            glyph_id: 0,   // .notdef
+            face_index: 0, // 主字体在 all_ids() 中的索引
+            is_color: false,
+            advance: width as f32,
+        };
+        self.glyph_cache.put(ch, info);
+        Some(info)
     }
 
     /// 在指定字体面中查找字符
-    fn lookup_in_face(&mut self, id: ID, face_index: usize, ch: char) -> Option<GlyphInfo> {
+    ///
+    /// `width` 与 `is_color` 由调用方传入，避免在字体树中硬编码 Unicode 宽度判定。
+    fn lookup_in_face(
+        &mut self,
+        id: ID,
+        face_index: usize,
+        ch: char,
+        width: usize,
+        is_color: bool,
+    ) -> Option<GlyphInfo> {
         // 获取字体数据
         let data = self.get_font_data(id)?;
 
@@ -186,11 +231,8 @@ impl FontTree {
             return None;
         }
 
-        // 检查是否为彩色字形（简化判断：Emoji 范围）
-        let is_color = is_emoji(ch);
-
-        // 获取前进宽度（简化：使用固定值）
-        let advance = if is_wide_char(ch) { 2.0 } else { 1.0 };
+        // 字符显示宽度由调用方（基于 WezTerm 权威结果）传入
+        let advance = width as f32;
 
         Some(GlyphInfo {
             glyph_id,
@@ -201,13 +243,17 @@ impl FontTree {
     }
 
     /// 获取字体数据（带缓存）
-    fn get_font_data(&mut self, id: ID) -> Option<Vec<u8>> {
+    ///
+    /// 返回 `Arc<[u8]>` clone，是廉价的引用计数 clone，不复制底层字体字节。
+    fn get_font_data(&mut self, id: ID) -> Option<Arc<[u8]>> {
         if let Some(data) = self.font_data_cache.get(&id) {
+            // Arc clone：仅增加引用计数，不复制字节
             return Some(data.clone());
         }
 
-        let data = self.db.with_face_data(id, |data, _index| data.to_vec())?;
-
+        let data: Vec<u8> = self.db.with_face_data(id, |data, _index| data.to_vec())?;
+        // Vec<u8> -> Arc<[u8]>：一次性分配引用计数，后续 clone 零拷贝
+        let data: Arc<[u8]> = data.into();
         self.font_data_cache.insert(id, data.clone());
         Some(data)
     }
@@ -247,37 +293,6 @@ impl Default for FontTree {
     }
 }
 
-/// 判断字符是否为 Emoji
-fn is_emoji(ch: char) -> bool {
-    let code = ch as u32;
-    // 常见 Emoji 范围
-    matches!(code,
-        0x1F600..=0x1F64F | // Emoticons
-        0x1F300..=0x1F5FF | // Misc Symbols and Pictographs
-        0x1F680..=0x1F6FF | // Transport and Map
-        0x1F1E0..=0x1F1FF | // Flags
-        0x2600..=0x26FF |   // Misc symbols
-        0x2700..=0x27BF |   // Dingbats
-        0xFE00..=0xFE0F |   // Variation Selectors
-        0x1F900..=0x1F9FF | // Supplemental Symbols and Pictographs
-        0x1FA00..=0x1FA6F | // Chess Symbols
-        0x1FA70..=0x1FAFF   // Symbols and Pictographs Extended-A
-    )
-}
-
-/// 判断字符是否为宽字符（CJK 等）
-fn is_wide_char(ch: char) -> bool {
-    let code = ch as u32;
-    // CJK 统一表意文字
-    (0x4E00..=0x9FFF).contains(&code) ||
-    // CJK 扩展 A
-    (0x3400..=0x4DBF).contains(&code) ||
-    // 韩文音节
-    (0xAC00..=0xD7A3).contains(&code) ||
-    // 日文假名
-    (0x3040..=0x30FF).contains(&code)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,7 +307,7 @@ mod tests {
     #[test]
     fn test_lookup_ascii() {
         let mut tree = FontTree::new();
-        let info = tree.lookup_glyph('A');
+        let info = tree.lookup_glyph('A', 1, false);
         // 应该能找到 ASCII 字符
         if let Some(info) = info {
             assert!(info.glyph_id > 0);
@@ -302,26 +317,38 @@ mod tests {
     #[test]
     fn test_lookup_cjk() {
         let mut tree = FontTree::new();
-        let info = tree.lookup_glyph('你');
-        // 系统应该有 CJK 字体（测试环境安装了 Noto Sans SC）
-        if let Some(info) = info {
-            assert!(info.glyph_id > 0);
+        // '你' 是 CJK 宽字符，width=2 来自 WezTerm 权威宽度表
+        let info = tree.lookup_glyph('你', 2, false);
+        // 系统若有 CJK 字体（如 Noto Sans SC），glyph_id > 0；
+        // 否则 Task 12 的 .notdef 回退保证返回 Some(glyph_id == 0) 而非 None。
+        if tree.primary_id.is_some() {
+            assert!(info.is_some(), "有主字体时，缺字应返回 .notdef 而非 None");
         }
     }
 
     #[test]
-    fn test_is_emoji() {
-        assert!(is_emoji('😀'));
-        assert!(is_emoji('🎉'));
-        assert!(!is_emoji('A'));
-        assert!(!is_emoji('你'));
-    }
-
-    #[test]
-    fn test_is_wide_char() {
-        assert!(is_wide_char('你'));
-        assert!(is_wide_char('あ'));
-        assert!(!is_wide_char('A'));
-        assert!(!is_wide_char(' '));
+    fn test_glyph_cache_bounded() {
+        // 验证 glyph_cache 有硬上限 GLYPH_CACHE_CAPACITY (8192)
+        // 插入超过上限数量的不同字符后，缓存大小不应超过上限
+        let mut tree = FontTree::new();
+        // 使用 BMP PUA 区字符，避免与 ASCII 等常用字符冲突
+        // 0xE000..=0xF8FF 是 BMP PUA（6400 个），剩余从补充区取
+        for i in 0..(GLYPH_CACHE_CAPACITY + 1000) as u32 {
+            // 跳过代理区 0xD800..=0xDFFF
+            let code = if i < 0x1900 {
+                0xE000 + i
+            } else {
+                0x10000 + (i - 0x1900)
+            };
+            if let Some(ch) = char::from_u32(code) {
+                let _ = tree.lookup_glyph(ch, 1, false);
+            }
+        }
+        assert!(
+            tree.glyph_cache.len() <= GLYPH_CACHE_CAPACITY,
+            "glyph_cache 应有硬上限 {}，实际 {}",
+            GLYPH_CACHE_CAPACITY,
+            tree.glyph_cache.len()
+        );
     }
 }

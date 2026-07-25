@@ -48,7 +48,7 @@ fn test_core_api_signatures() {
     let _icon: String = mgr.icon_name();
     let _alt: bool = mgr.is_alt_screen_active();
     let _marker: Marker = mgr.add_marker(5);
-    let _markers: &[Marker] = mgr.markers();
+    let _markers: Vec<Marker> = mgr.markers();
     let _removed: bool = mgr.remove_marker(0);
     let _buffer: Buffer = mgr.buffer();
     let _fg: Color = mgr.default_fg();
@@ -73,7 +73,7 @@ fn test_core_api_signatures() {
     dt.resize(30, 100);
 
     // Buffer / Marker
-    let _ns = BufferNamespace::new(TerminalSize::new(24, 80));
+    let _ns = BufferNamespace::new();
     let _buf = Buffer {
         kind: BufferType::Normal,
         cursor_y: 0,
