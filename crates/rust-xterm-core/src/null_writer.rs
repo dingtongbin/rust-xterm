@@ -102,7 +102,7 @@ impl Write for CapturingWriter {
                 target.extend_from_slice(buf);
                 Ok(buf.len())
             }
-            Err(_) => Err(io::Error::new(io::ErrorKind::Other, "buffer poisoned")),
+            Err(_) => Err(io::Error::other("buffer poisoned")),
         }
     }
 

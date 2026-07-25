@@ -33,7 +33,7 @@ fn test_yes_pressure_stability() {
 
         // 定期轮询帧
         poll_count += 1;
-        if poll_count % 5 == 0 {
+        if poll_count.is_multiple_of(5) {
             let _ = mgr.poll_frame(Instant::now());
         }
     }
