@@ -722,7 +722,7 @@ mod tests {
         let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
         // 写满 24 行（每行带换行），最后一行触发滚动前 add_marker
         for i in 0..24 {
-            let line = format!("line{}\r\n", i);
+            let line = format!("line{i}\r\n");
             mgr.write(line.as_bytes());
         }
         // 此时 scrollback 仍为 0（屏幕刚好填满），add_marker(23) 标记最后一行

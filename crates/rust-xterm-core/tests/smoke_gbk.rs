@@ -35,8 +35,7 @@ fn test_gbk_chinese_output() {
 
     assert!(
         full_text.contains("你好世界"),
-        "屏幕应包含'你好世界'，实际: '{}'",
-        full_text
+        "屏幕应包含'你好世界'，实际: '{full_text}'"
     );
 }
 
@@ -61,8 +60,7 @@ fn test_gbk_split_packet_handling() {
 
     assert!(
         full_text.contains("你好"),
-        "断包后应正确解码'你好'，实际: '{}'",
-        full_text
+        "断包后应正确解码'你好'，实际: '{full_text}'"
     );
 }
 
@@ -87,8 +85,7 @@ fn test_gbk_mixed_ascii_chinese() {
 
     assert!(
         full_text.contains("Hello") && full_text.contains("你好") && full_text.contains("World"),
-        "应正确解码混合内容，实际: '{}'",
-        full_text
+        "应正确解码混合内容，实际: '{full_text}'"
     );
 }
 
@@ -107,7 +104,7 @@ fn test_gbk_invalid_sequence_no_crash() {
     for seq in &invalid_sequences {
         // 不应 panic
         let result = gate.decode(seq);
-        println!("解码 {:?} -> {:?}", seq, result);
+        println!("解码 {seq:?} -> {result:?}");
     }
 }
 

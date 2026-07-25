@@ -49,7 +49,7 @@ fn main() {
     for (y, row) in snap.rows.iter().enumerate() {
         let text: String = row.iter().map(|c| c.text.as_str()).collect();
         if !text.trim().is_empty() {
-            println!("  {:>2}: {}", y, text);
+            println!("  {y:>2}: {text}");
         }
     }
 }
