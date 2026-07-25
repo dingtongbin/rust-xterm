@@ -161,6 +161,14 @@ impl WezTermCore {
         self.terminal.is_alt_screen_active()
     }
 
+    /// 是否启用了括号粘贴模式（bracketed paste）
+    ///
+    /// 当应用发送 `\x1b[?2004h` 时启用，`\x1b[?2004l` 时禁用。
+    /// WezTerm 内部维护此状态，这里直接委托。
+    pub fn is_bracketed_paste_enabled(&self) -> bool {
+        self.terminal.bracketed_paste_enabled()
+    }
+
     /// 获取当前调色板
     pub fn palette(&self) -> wezterm_term::color::ColorPalette {
         self.terminal.palette()
@@ -181,8 +189,8 @@ impl WezTermCore {
     ///
     /// 返回所有可见行的 Cell 数据。
     /// 注意：此方法会克隆数据，应在渲染时调用，不要在输入流中调用。
-    pub fn screen_snapshot(&self) -> ScreenSnapshot {
-        self.snapshot_scrolled(0)
+    pub fn screen_snapshot(&self, default_fg: Color, default_bg: Color) -> ScreenSnapshot {
+        self.snapshot_scrolled(0, default_fg, default_bg)
     }
 
     /// 获取带滚动偏移的屏幕快照
@@ -190,7 +198,15 @@ impl WezTermCore {
     /// `scroll_offset = 0` 等价于 [`Self::screen_snapshot`]（实时可视窗口）；
     /// `scroll_offset > 0` 表示向上回溯 `scroll_offset` 行进入历史滚动缓冲。
     /// 超出可用回溯行数时自动 clamp 到最大值。
-    pub fn snapshot_scrolled(&self, scroll_offset: usize) -> ScreenSnapshot {
+    ///
+    /// - `default_fg`：默认前景色，用于 `ColorAttribute::Default` 的前景色回退
+    /// - `default_bg`：默认背景色，用于 `ColorAttribute::Default` 的背景色回退
+    pub fn snapshot_scrolled(
+        &self,
+        scroll_offset: usize,
+        default_fg: Color,
+        default_bg: Color,
+    ) -> ScreenSnapshot {
         let screen = self.terminal.screen();
         let palette = self.terminal.palette();
         let seqno = self.current_seqno();
@@ -211,7 +227,7 @@ impl WezTermCore {
         for line in &lines {
             let mut row = Vec::with_capacity(screen.physical_cols);
             for cell_ref in line.visible_cells() {
-                let cell = convert_cell(&cell_ref, &palette);
+                let cell = convert_cell(&cell_ref, &palette, default_fg, default_bg);
                 row.push(cell);
             }
             // 补齐列数
@@ -265,7 +281,10 @@ impl WezTermCore {
     }
 
     /// 获取指定行的 Cell 数据（增量渲染用）
-    pub fn row_cells(&self, y: usize) -> Vec<RustXtermCell> {
+    ///
+    /// - `default_fg`：默认前景色，用于 `ColorAttribute::Default` 的前景色回退
+    /// - `default_bg`：默认背景色，用于 `ColorAttribute::Default` 的背景色回退
+    pub fn row_cells(&self, y: usize, default_fg: Color, default_bg: Color) -> Vec<RustXtermCell> {
         let screen = self.terminal.screen();
         let palette = self.terminal.palette();
 
@@ -281,7 +300,7 @@ impl WezTermCore {
         if let Some(line) = lines.get(y) {
             let mut row = Vec::with_capacity(screen.physical_cols);
             for cell_ref in line.visible_cells() {
-                let cell = convert_cell(&cell_ref, &palette);
+                let cell = convert_cell(&cell_ref, &palette, default_fg, default_bg);
                 row.push(cell);
             }
             while row.len() < screen.physical_cols {
@@ -337,17 +356,25 @@ impl ScreenSnapshot {
 }
 
 /// 转换 WezTerm CellRef 为 rust-xterm RustXtermCell
+///
+/// - `default_fg`/`default_bg`：用户配置的默认前景/背景色，
+///   用于 `ColorAttribute::Default` 分支，避免硬编码黑白
 fn convert_cell(
     cell_ref: &wezterm_term::CellRef,
     palette: &wezterm_term::color::ColorPalette,
+    default_fg: Color,
+    default_bg: Color,
 ) -> RustXtermCell {
     let text = cell_ref.str().to_string();
     let width = cell_ref.width();
     let attrs = cell_ref.attrs();
     let flags = CellFlags::from_attrs(attrs);
 
-    let fg = resolve_color(attrs.foreground(), palette, true);
-    let bg = resolve_color(attrs.background(), palette, false);
+    let fg = resolve_color(attrs.foreground(), palette, true, default_fg, default_bg);
+    let bg = resolve_color(attrs.background(), palette, false, default_fg, default_bg);
+
+    // 尝试提取超链接
+    let hyperlink = attrs.hyperlink().map(|h| h.uri().to_string());
 
     RustXtermCell {
         text,
@@ -355,23 +382,29 @@ fn convert_cell(
         fg,
         bg,
         flags,
+        hyperlink,
     }
 }
 
 /// 解析 WezTerm ColorAttribute 为 rust-xterm Color
+///
+/// - `default_fg`/`default_bg`：当 `color_attr == ColorAttribute::Default` 时，
+///   根据是前景还是背景返回对应默认色（而非硬编码的黑白）
 fn resolve_color(
     color_attr: wezterm_term::color::ColorAttribute,
     palette: &wezterm_term::color::ColorPalette,
     is_foreground: bool,
+    default_fg: Color,
+    default_bg: Color,
 ) -> Color {
     use wezterm_term::color::ColorAttribute;
 
     match color_attr {
         ColorAttribute::Default => {
             if is_foreground {
-                Color::WHITE
+                default_fg
             } else {
-                Color::BLACK
+                default_bg
             }
         }
         ColorAttribute::TrueColorWithDefaultFallback(srgba) => {

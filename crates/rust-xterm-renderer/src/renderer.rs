@@ -233,6 +233,37 @@ impl Renderer {
         (0, y, max_width, metrics.cell_height)
     }
 
+    /// 渲染一帧：仅渲染指定的脏行，并收集脏矩形
+    ///
+    /// 对 `dirty_rows` 中的每一行调用 `render_row`，将返回的矩形
+    /// 累积到 `RenderResult.dirty_rects` 中返回给上层。
+    ///
+    /// # 参数
+    ///
+    /// - `dirty_rows`：需要重绘的行号列表（0-based）
+    /// - `cells`：按行索引取用的 Cell 行切片集合（`cells[row]` 为该行的 Cell）
+    ///
+    /// # 返回
+    ///
+    /// 填充好 `dirty_rects` 的 `RenderResult`，每个脏行对应一个矩形
+    /// `(x, y, width, height)`，其中 `y = row * cell_height`。
+    pub fn render_frame(&mut self, dirty_rows: &[u32], cells: &[&[RustXtermCell]]) -> RenderResult {
+        let mut result = RenderResult {
+            dirty_rects: Vec::with_capacity(dirty_rows.len()),
+            cursor: None,
+        };
+        for &row in dirty_rows {
+            // 跳过超出 cells 范围的行号，避免越界
+            let row_cells = match cells.get(row as usize) {
+                Some(c) => c,
+                None => continue,
+            };
+            let rect = self.render_row(row, row_cells);
+            result.dirty_rects.push(rect);
+        }
+        result
+    }
+
     /// 渲染单个 Cell 的文本
     fn render_cell_text(&mut self, x: u32, y: u32, cell: &RustXtermCell) {
         // 获取字符
@@ -242,11 +273,23 @@ impl Renderer {
             return;
         };
 
-        // 查找字形
-        let glyph_info = match self.font_tree.lookup_glyph(ch) {
+        // 查找字形：传入 cell.width（WezTerm 权威宽度）与 is_color 提示。
+        // 不再依赖 font_tree 内部的硬编码 Unicode 宽度判定。
+        // is_color 默认 false：当前 CellFlags 没有 emoji 标志位，
+        // 未来扩展时可由 cell flags 覆盖。
+        let is_color_hint = false;
+        let glyph_info = match self.font_tree.lookup_glyph(ch, cell.width, is_color_hint) {
             Some(info) => info,
             None => return,
         };
+
+        // Task 12: 缺字画 notdef 方块
+        // glyph_id == 0 表示 .notdef（所有字体都未覆盖该字符），
+        // 此时画一个方块以提示缺字，而不是静默跳过留下空白。
+        if glyph_info.glyph_id == 0 {
+            self.render_missing_glyph_box(x, y, cell);
+            return;
+        }
 
         // 查找图集
         let bold = cell.flags.contains(CellFlags::BOLD);
@@ -292,13 +335,40 @@ impl Renderer {
         self.composite_glyph(x, y, entry, fg, cell.flags.contains(CellFlags::DIM));
     }
 
+    /// 渲染缺字方块（.notdef 占位符）
+    ///
+    /// 当 `lookup_glyph` 返回 `glyph_id == 0`（所有字体都未覆盖该字符）时调用。
+    /// 用前景色在 cell 内画一个略小于 cell 的实心方块，提示缺字。
+    fn render_missing_glyph_box(&mut self, x: u32, y: u32, cell: &RustXtermCell) {
+        let metrics = self.config.metrics;
+        let cell_w = (cell.width as u32) * metrics.cell_width;
+        let cell_h = metrics.cell_height;
+
+        let fg = if cell.flags.contains(CellFlags::REVERSE) {
+            cell.bg
+        } else {
+            cell.fg
+        };
+
+        // 留 1px 边距，与背景区分
+        let box_x = x.saturating_add(1);
+        let box_y = y.saturating_add(1);
+        let box_w = cell_w.saturating_sub(2);
+        let box_h = cell_h.saturating_sub(2);
+        self.canvas
+            .fill_rect(box_x, box_y, box_w, box_h, fg.r, fg.g, fg.b, fg.a);
+    }
+
     /// 光栅化字形
     fn rasterize_glyph(&mut self, ch: char, is_color: bool) -> Option<RasterizedGlyph> {
         let metrics = self.config.metrics;
         let ppem = metrics.font_size;
 
         // 获取字体数据
-        let glyph_info = self.font_tree.lookup_glyph(ch)?;
+        // 注意：此处 width/is_color 仅用于复用缓存条目，实际渲染宽度由 cell 决定。
+        // rasterize_glyph 仅在 render_cell_text 通过 notdef 检查后调用，
+        // 故 glyph_id 必然 > 0，不会触发 notdef 回退路径。
+        let glyph_info = self.font_tree.lookup_glyph(ch, 1, is_color)?;
         let ids = self.font_tree.all_ids();
         let face_id = ids.get(glyph_info.face_index)?;
         let data = self
@@ -558,6 +628,7 @@ mod tests {
                 fg: Color::WHITE,
                 bg: Color::BLACK,
                 flags: CellFlags(0),
+                hyperlink: None,
             })
             .collect();
         let rect = renderer.render_row(0, &cells);
@@ -586,8 +657,86 @@ mod tests {
             fg: Color::WHITE,
             bg: Color::BLACK,
             flags: CellFlags(CellFlags::UNDERCURL),
+            hyperlink: None,
         };
         renderer.render_decorations(0, 0, &cell);
         // 不 panic 即通过
+    }
+
+    #[test]
+    fn test_render_frame_dirty_rects() {
+        // 仅渲染指定的几行，断言 dirty_rects 长度等于行数，
+        // 且每行矩形 y 坐标 = row * cell_height
+        let mut renderer = Renderer::new(RendererConfig::default());
+        let cell_height = renderer.metrics().cell_height;
+
+        // 准备 10 行空白 Cell
+        let rows: Vec<Vec<RustXtermCell>> =
+            (0..10).map(|_| vec![RustXtermCell::blank(); 5]).collect();
+        let cells: Vec<&[RustXtermCell]> = rows.iter().map(|r| r.as_slice()).collect();
+
+        // 仅渲染第 2、5、8 行
+        let dirty_rows: [u32; 3] = [2, 5, 8];
+        let result = renderer.render_frame(&dirty_rows, &cells);
+
+        assert_eq!(
+            result.dirty_rects.len(),
+            dirty_rows.len(),
+            "dirty_rects 数量应等于脏行数"
+        );
+        for (i, &row) in dirty_rows.iter().enumerate() {
+            let rect = result.dirty_rects[i];
+            assert_eq!(
+                rect.1,
+                row * cell_height,
+                "第 {} 个矩形 y 坐标应为 row({}) * cell_height({}) = {}",
+                i,
+                row,
+                cell_height,
+                row * cell_height
+            );
+            assert_eq!(rect.3, cell_height, "矩形高度应等于 cell_height");
+        }
+    }
+
+    #[test]
+    fn test_missing_glyph_renders_box() {
+        // 渲染一个系统字体几乎不可能覆盖的字符（Supplementary PUA-B 末尾），
+        // 触发 .notdef 路径，断言 canvas 对应位置有非零像素（前景色方块）。
+        let mut renderer = Renderer::new(RendererConfig::default());
+        let metrics = renderer.metrics();
+
+        // U+10FFFD：Supplementary Private Use Area-B 末尾，系统字体通常不覆盖
+        let ch = '\u{10FFFD}';
+        let cell = RustXtermCell {
+            text: ch.to_string(),
+            width: 1,
+            fg: Color::WHITE,
+            bg: Color::BLACK,
+            flags: CellFlags(0),
+            hyperlink: None,
+        };
+        let cells = vec![cell];
+        renderer.render_row(0, &cells);
+
+        // 检查 cell 区域有非零像素（notdef 方块用前景色白色绘制）
+        let canvas = renderer.canvas();
+        let mut found_non_zero = false;
+        for py in 0..metrics.cell_height {
+            for px in 0..metrics.cell_width {
+                let (r, g, b, _) = canvas.get_pixel(px, py);
+                if r > 0 || g > 0 || b > 0 {
+                    found_non_zero = true;
+                    break;
+                }
+            }
+            if found_non_zero {
+                break;
+            }
+        }
+        assert!(
+            found_non_zero,
+            "缺字位置应画出 notdef 方块，但 canvas 全黑（背景色）"
+        );
     }
 }

@@ -1,0 +1,37 @@
+# Checklist
+
+- [x] resolve_color 的 Default 分支使用传入的 default_fg/default_bg 而非硬编码
+- [x] convert_cell 签名透传默认色，所有调用点（snapshot_scrolled/screen_snapshot/row_cells）已更新
+- [x] test_default_color_respects_theme 测试通过
+- [x] TextureAtlas 回绕路径清理 dynamic_cache 中被覆盖区域的旧条目
+- [x] test_wraparound_clears_stale_entries 测试通过
+- [x] BufferNamespace 不再含 normal/alternate/active 影子字段
+- [x] buffer() 仍能正确返回实时快照
+- [x] Marker.line 在 scrollback 增长时按推出行数递减
+- [x] 推出可视区的 marker 被移除
+- [x] test_marker_tracks_scroll 测试通过
+- [x] TerminalManager 持有 Parser 字段并在 write() 中 dispatch OSC
+- [x] test_osc_handler_invoked 测试通过
+- [x] Bell 事件在写 BEL 字节时被 emit
+- [x] IconNameChange 在图标名变更时被 emit
+- [x] ClipboardRequest 在 OSC 52 时被 emit
+- [x] test_bell_event 测试通过
+- [x] is_bracketed_paste_enabled() API 已暴露
+- [x] test_bracketed_paste_query 测试通过
+- [x] RustXtermCell 含 hyperlink: Option<String> 字段
+- [x] convert_cell 从 WezTerm attrs 提取 hyperlink
+- [x] FontTree.glyph_cache 为有界 LruCache（上限 8192）
+- [x] font_data_cache 值为 Arc<[u8]>，get_font_data 返回 Arc clone
+- [x] test_glyph_cache_bounded 测试通过
+- [x] font_tree.rs 中 is_emoji/is_wide_char 函数已删除
+- [x] renderer.rs 不再依赖 font_tree 的宽度判定
+- [x] test_is_emoji/test_is_wide_char 测试已删除
+- [x] Renderer::render_frame 填充 RenderResult.dirty_rects
+- [x] test_render_frame_dirty_rects 测试通过
+- [x] lookup_glyph 全 miss 时返回 notdef glyph
+- [x] render_cell_text 在 notdef 时画方块
+- [x] test_missing_glyph_renders_box 测试通过
+- [x] 全部 crate 的 cargo build --all-targets 通过
+- [x] 全部 crate 的 cargo clippy --all-targets -- -D warnings 通过
+- [x] cargo fmt --all -- --check 通过
+- [x] FEATURES.md 中对应条目状态已更新（部分实现→已实现）

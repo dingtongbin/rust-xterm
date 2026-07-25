@@ -103,6 +103,8 @@ pub struct RustXtermCell {
     pub bg: Color,
     /// 属性标志
     pub flags: CellFlags,
+    /// 超链接（OSC 8 解析得到），无则为 None
+    pub hyperlink: Option<String>,
 }
 
 impl RustXtermCell {
@@ -114,6 +116,7 @@ impl RustXtermCell {
             fg: Color::WHITE,
             bg: Color::BLACK,
             flags: CellFlags(0),
+            hyperlink: None,
         }
     }
 
@@ -125,6 +128,11 @@ impl RustXtermCell {
     /// 是否为宽字符
     pub fn is_wide(&self) -> bool {
         self.width == 2
+    }
+
+    /// 是否带超链接
+    pub fn has_hyperlink(&self) -> bool {
+        self.hyperlink.is_some()
     }
 }
 

@@ -259,20 +259,33 @@ impl TextureAtlas {
             // 换行
             let new_y = cy + self.row_height;
             if new_y + h > self.height {
-                // 动态区已满，重置到动态区起始位置（LRU 会处理旧条目失效）
-                self.dynamic_cursor = (0, self.static_region_height);
+                // 动态区已满，回绕到动态区起始位置。
+                // 必须清理 dynamic_cache：旧 entry 指向的像素区域即将被新字形覆盖，
+                // 否则命中旧 entry 时 sample_alpha 会读到新字形的像素，造成"鬼影"。
+                self.wrap_around_dynamic();
             } else {
                 self.dynamic_cursor = (0, new_y);
             }
         }
         let (px, py) = self.dynamic_cursor;
         if py + h > self.height {
-            // 回绕到动态区起始位置
-            self.dynamic_cursor = (0, self.static_region_height);
+            // 回绕到动态区起始位置，同样需要清理旧 entry 防止鬼影
+            self.wrap_around_dynamic();
             return Some((0, self.static_region_height));
         }
         self.dynamic_cursor = (px + w, py);
         Some((px, py))
+    }
+
+    /// 动态区回绕：重置写入游标并清空动态缓存
+    ///
+    /// 回绕意味着动态区从顶部重新开始写入，旧像素会被新字形覆盖。
+    /// 此时必须清空 `dynamic_cache`，否则旧 entry 命中后会从已覆盖的
+    /// 像素区域采样，导致"鬼影"。
+    fn wrap_around_dynamic(&mut self) {
+        self.dynamic_cursor = (0, self.static_region_height);
+        self.dynamic_cache.clear();
+        self.stats.dynamic_slots = 0;
     }
 
     /// 将像素数据写入缓冲区
@@ -407,5 +420,34 @@ mod tests {
         // 采样写入的区域
         let alpha = atlas.sample_alpha(0, 0);
         assert_eq!(alpha, 255);
+    }
+
+    #[test]
+    fn test_wraparound_clears_stale_entries() {
+        // 配置：64x64 图集，静态区高度=16，动态区高度=48，row_height=20
+        // 动态区可容纳 2 行（y=16, y=36），每行可放 64/8=8 个 8x16 字形
+        // 第 17 个字形触发回绕（cursor 从 (64,36) 换行时 new_y=56+16>64）
+        let mut atlas = TextureAtlas::new(64, 64, 1, 20);
+
+        // 插入第一个字形 'A'，验证可查
+        let pixels_a = vec![200u8; 8 * 16];
+        let entry_a = atlas.insert_dynamic('A', false, false, &pixels_a, 8, 16, 0, 0, false);
+        assert!(entry_a.is_some());
+        assert!(atlas.lookup_dynamic('A', false, false).is_some());
+
+        // 填满动态区并触发回绕：插入 20 个不同字形，第 17 个会触发回绕
+        for i in 0..20u32 {
+            // 用 PUA 区字符避免与 'A' 冲突
+            let ch = char::from_u32(0xE000 + i).unwrap();
+            let pixels = vec![100u8; 8 * 16];
+            let _ = atlas.insert_dynamic(ch, false, false, &pixels, 8, 16, 0, 0, false);
+        }
+
+        // 回绕后 dynamic_cache 被清空，旧 entry 'A' 不应被命中
+        // （否则会读到新字形的像素，造成"鬼影"）
+        assert!(
+            atlas.lookup_dynamic('A', false, false).is_none(),
+            "回绕后旧 entry 应被清理，避免鬼影"
+        );
     }
 }

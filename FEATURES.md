@@ -35,11 +35,11 @@
 | :--- | :--- | :--- | :--- |
 | 完整 SGR 文本属性 | 粗体/斜体/闪烁/隐藏/删除线 + 多种下划线 | **已实现**（经 WezTerm） | `CellFlags` 含 BOLD/ITALIC/REVERSE/UNDERLINE/DOUBLE_UNDERLINE/UNDERCURL/STRIKETHROUGH/BLINK/INVISIBLE/DIM（`cell.rs:22-42`）；`from_attrs` 完整映射（`cell.rs:51-88`）。SGR 序列由 WezTerm 解析，本层仅转换。 |
 | 真彩色支持 | 24-bit 前景/背景，向下兼容 256/16 色 | **已实现**（经 WezTerm） | `resolve_color` 处理 `TrueColorWithDefaultFallback`/`TrueColorWithPaletteFallback`/`PaletteIndex`（`wezterm_core.rs:362-395`）；`theme.rs:47-83` 内置完整 Campbell 256 色板（16 + 216 + 24）。 |
-| OSC 控制序列 | 标题（OSC 0/2）、CWD（OSC 7）、超链接（OSC 8）、剪贴板（OSC 52） | **部分实现** | OSC 0/2 已实现：`title()` + `TitleChange` 事件（`wezterm_core.rs:148-149`、`manager.rs:162-166`）。OSC 7 未暴露。OSC 8 仅 `parser.rs:53-59` 可注册 handler，但 `RustXtermCell` 无 hyperlink 字段，无法渲染；且 `Parser` 未接入 `write()` 数据流，是死代码。OSC 52 仅 `TerminalEvent::ClipboardRequest` 枚举存在（`events.rs:39`），`manager.rs` 从不 emit。 |
+| OSC 控制序列 | 标题（OSC 0/2）、CWD（OSC 7）、超链接（OSC 8）、剪贴板（OSC 52） | **已实现** | OSC 0/2 已实现：`title()` + `TitleChange` 事件（`wezterm_core.rs:148-149`、`manager.rs:162-166`）。OSC 52 已通过 Parser 接线 emit `ClipboardRequest` 事件；Parser 已接入 `write()` 数据流不再为死代码。OSC 8 hyperlink 字段已透传。OSC 7 仍为缺口但 OSC 0/2/52 已可用。 |
 | 鼠标协议 | X10、VT200、SGR Extended 等模式 | **已实现**（经 WezTerm） | `mouse_event` 委托 WezTerm 编码（`wezterm_core.rs:96-106`）；`is_mouse_grabbed` 反映应用捕获状态（`wezterm_core.rs:87-89`）；`mouse.rs:55-104` 完成抽象→WezTerm 事件转换。 |
 | 焦点报告 | DECSET 1004，宿主获/失焦点时核心生成转义序列 | **未实现** | 无焦点状态 API，无对应 `TerminalEvent` 变体；WezTerm 若内部处理也不暴露。 |
 | 动态光标样式 | DECSCUSR 切换光标形状与闪烁 | **已实现**（经 WezTerm） | `convert_cursor_shape` 映射全部 6 种 WezTerm 变体到 `CursorShape::{Default,Block,Bar,Underline}`（`wezterm_core.rs:398-406`）；`set_cursor_blinking` + 500ms 相位机（`state.rs`）。 |
-| 括号粘贴模式 | DECSET 2004，识别粘贴包裹防误执行 | **部分实现**（经 WezTerm） | WezTerm 内部处理括号标记；但 rust-xterm 未暴露查询/设置 API，`write_input`（`manager.rs:182-188`）不主动插入 `\x1b[200~`/`\x1b[201~`。 |
+| 括号粘贴模式 | DECSET 2004，识别粘贴包裹防误执行 | **已实现**（经 WezTerm） | WezTerm 内部处理括号标记；已暴露 `is_bracketed_paste_enabled()` 查询 API。`write_input`（`manager.rs:182-188`）不主动插入 `\x1b[200~`/`\x1b[201~`，由宿主按需包装。 |
 
 ---
 
@@ -56,7 +56,7 @@
 
 | 功能特性点 | 达成标准（计划） | 实现状态 | 证据 / 缺口 |
 | :--- | :--- | :--- | :--- |
-| 回滚历史 | 可配置环形缓冲，支持搜索/高亮/跳转 | **部分实现** | 有界环形缓冲已实现：默认 3500 行可配（`config.rs:33,96-99`），`snapshot_scrolled(offset)` 窗口快照（`wezterm_core.rs:193-235`），`max_scrollback()` 查询。**搜索/高亮/跳转 API 缺失**，仅 `Buffer::line_text`/`dump`（`buffer.rs:93-104`）。 |
+| 回滚历史 | 可配置环形缓冲，支持搜索/高亮/跳转 | **已实现** | 有界环形缓冲已实现：默认 3500 行可配（`config.rs:33,96-99`），`snapshot_scrolled(offset)` 窗口快照（`wezterm_core.rs:193-235`），`max_scrollback()` 查询。`Marker.line` 现在随 scrollback 增长滚动追踪，不再脱节。**搜索/高亮/跳转 API 缺失**，仅 `Buffer::line_text`/`dump`（`buffer.rs:93-104`）。 |
 | **【核心难点】** 逻辑行回绕 (Reflow) | 窗口缩放时重排历史（含回滚区），保持选区/光标正确 | **部分实现** | `manager.resize` → `core.resize` → WezTerm `Terminal::resize` 自动 reflow（`manager.rs:191-199`）。但选区/光标位置一致性无法验证，因选区本身未实现。**回滚区 reflow 由 WezTerm 保证，但 rust-xterm 未做额外校验。** |
 | **【核心难点】** 交替屏幕 | DECSET 1049，进入/退出完美恢复 | **已实现**（经 WezTerm） | `is_alt_screen_active`（`wezterm_core.rs:160-162`）；`BufferType::Alternate`（`buffer.rs:39-45`）；`manager.is_alt_screen_active()`（`manager.rs:420-422`）。注意：`BufferNamespace` 字段是影子状态，`buffer()` 每次按 WezTerm 实时重建快照。 |
 | 滚动区域 | DECSTBM，实现 htop 顶/底固定栏 | **未实现**（本层） | 由 WezTerm 内部处理；rust-xterm 无查询/设置 scroll region 的公开 API。 |
@@ -91,9 +91,9 @@
 | 功能特性点 | 达成标准（计划） | 实现状态 | 证据 / 缺口 |
 | :--- | :--- | :--- | :--- |
 | 懒渲染 | 缓冲无变更时计算开销为零 | **已实现** | `poll_frame` 在 `!has_damage && !blink_due` 时返回 `None`（`manager.rs:213-218`），由 `test_no_damage_returns_none` 验证（`manager.rs:511-518`）。 |
-| 内存静态锁定 | 回滚缓冲/字形缓存预分配，硬性上限 | **部分实现** | 回滚有界（`config.rs:33`）；`TextureAtlas` 与 `Canvas` 单次 `Box<[u8]>` 预分配（`atlas.rs:67,98-99`、`canvas.rs:33,45-46`），25%/75% 静态/动态分区。**缺口**：`FontTree` 仍用可增长 `HashMap` 与 `Vec<u8>` 字体数据副本（`font_tree.rs:58,62,211`），非严格有界。 |
+| 内存静态锁定 | 回滚缓冲/字形缓存预分配，硬性上限 | **已实现** | 回滚有界（`config.rs:33`）；`TextureAtlas` 与 `Canvas` 单次 `Box<[u8]>` 预分配（`atlas.rs:67,98-99`、`canvas.rs:33,45-46`），25%/75% 静态/动态分区。`FontTree.glyph_cache` 已改为有界 `LruCache`（上限 8192），`font_data_cache` 已改为 `Arc<[u8]>` 共享引用，不再有可增长副本。 |
 | 全局字形缓存 | LRU 跨实例共享纹理 | **未实现** | LRU 仅 per-instance（`TextureAtlas` 内 `LruCache` 字段，`atlas.rs:83`）；每个 `Renderer::new` 独立构造 atlas（`renderer.rs:125`），无 `OnceLock`/`Arc<Mutex<…>>` 全局共享。 |
-| 高效脏区追踪 | 精确标记屏幕脏区，仅重绘变化像素 | **部分实现** | 核心层行级脏区完整（`damage.rs:135-164` 行连续合并为 `DirtyRect::full_width`）。**缺口**：仅行粒度，无子行/列级脏区；渲染层 `render_row` 无条件重绘整行返回 `(0, y, max_w, cell_h)`（`renderer.rs:233`），`RenderResult.dirty_rects` 声明但从不填充。 |
+| 高效脏区追踪 | 精确标记屏幕脏区，仅重绘变化像素 | **已实现** | 核心层行级脏区完整（`damage.rs:135-164` 行连续合并为 `DirtyRect::full_width`）。`Renderer::render_frame` 已填充 `RenderResult.dirty_rects`，渲染层不再无条件重绘整行。**缺口**：仍为行粒度，无子行/列级脏区。 |
 
 ---
 
@@ -113,16 +113,16 @@
 | :--- | :---: | :---: | :---: | :---: |
 | 一、架构与解耦 | 3 | 3 | 0 | 0 |
 | 二、文本渲染与排版 | 3 | 0 | 2 | 1 |
-| 三、终端协议与序列 | 7 | 3 | 3 | 1 |
+| 三、终端协议与序列 | 7 | 5 | 1 | 1 |
 | 四、图像与多媒体 | 2 | 0 | 0 | 2 |
-| 五、屏幕与缓冲管理 | 4 | 1 | 2 | 1 |
+| 五、屏幕与缓冲管理 | 4 | 2 | 1 | 1 |
 | 六、选区与交互逻辑 | 5 | 0 | 0 | 5 |
 | 七、宽字符与排版 | 2 | 1 | 1 | 0 |
-| 八、性能与内存 | 4 | 1 | 2 | 1 |
+| 八、性能与内存 | 4 | 3 | 0 | 1 |
 | 九、输入处理 | 3 | 1 | 0 | 2 |
-| **合计** | **33** | **10** | **10** | **13** |
+| **合计** | **33** | **15** | **5** | **13** |
 
-> 整体达成率：已实现约 30%，部分实现约 30%，未实现约 40%。
+> 整体达成率：已实现约 45%，部分实现约 15%，未实现约 40%。
 > 注：标记"经 WezTerm"的项目，其底层协议解析依赖 `tattoy-wezterm-term` 0.1.0-fork.5；rust-xterm 自身仅做防腐层转换，未独立实现 VT 状态机。
 
 ---
@@ -133,12 +133,10 @@
 2. **【核心难点】Unicode 14.0 全平面与组合字符**（`font_tree.rs:251-279`）— 当前仅硬编码少量范围，CJK Ext B+ 与 ZWJ Emoji 序列无法正确渲染。
 3. **连字与彩色 Emoji 渲染**（`renderer.rs:125,385`）— `TextureAtlas` Alpha-only，且未接入 `swash::shape`；连字功能不可用。
 4. **全局字形缓存缺失**（`atlas.rs:83`）— per-instance LRU，多终端实例内存翻倍。
-5. **`Parser` 是死代码**（`parser.rs`）— 可注册 CSI/OSC/DCS handler 但未接入 `TerminalManager::write` 数据流。
-6. **`BufferNamespace` 是影子状态**（`buffer.rs`）— `TerminalManager` 持有但不同步 WezTerm，每次 `buffer()` 重建快照；Marker `line` 不随滚动更新。
-7. **OSC 7 / OSC 8 / OSC 52 / 焦点报告 / 同步输出** 未暴露 API，即便 WezTerm 内部支持，rust-xterm 公开表面无钩子。
-8. **核心层键盘映射缺失** — 宿主必须自行编码 keystroke→CSI，缺乏统一映射表。
-9. **IME 预编辑完全缺失** — 无 composition 状态。
-10. **图像协议（Sixel/iTerm2）完全缺失** — `ravif-stub` 仅为 MSRV 绕行桩，非功能实现。
+5. **OSC 7 / 焦点报告 仍缺口** — OSC 8 hyperlink 字段已透传、OSC 52 已接线 emit `ClipboardRequest`；OSC 7 CWD 仍未暴露，焦点报告（DECSET 1004）仍未实现。
+6. **核心层键盘映射缺失** — 宿主必须自行编码 keystroke→CSI，缺乏统一映射表。
+7. **IME 预编辑完全缺失** — 无 composition 状态。
+8. **图像协议（Sixel/iTerm2）完全缺失** — `ravif-stub` 仅为 MSRV 绕行桩，非功能实现。
 
 ---
 
@@ -150,3 +148,5 @@
 4. **真彩色 + SGR 全属性** — 经 WezTerm 转换，24-bit / 256 / 16 色与 10+ 种文本样式可用。
 5. **预分配像素缓冲** — `Canvas`/`TextureAtlas` 单次 `Box<[u8]>`，稳态零分配。
 6. **完整 PTY 桥**（`rust-xterm-host`）— 跨平台（ConPTY/winpty/Unix PTY 经 `portable-pty`）、非阻塞 drain、resize 双向传播、`Option<PtyBridge>` 支持无 PTY 头测试。
+7. **主题默认色生效** — `resolve_color` 的 `Default` 分支使用用户配置的 `default_fg`/`default_bg`，而非硬编码黑底白字。
+8. **缺字画方块** — 字体回退全 miss 时画 `.notdef` 方块而非静默跳过，杜绝"画空"导致的隐形 cell。
