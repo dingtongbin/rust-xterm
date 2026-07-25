@@ -95,3 +95,5 @@ overflow-checks = true
 # crates/ravif-stub/Cargo.toml 的注释。
 [patch.crates-io]
 ravif = { path = "crates/ravif-stub" }
+tattoy-wezterm-escape-parser = { path = "vendor/tattoy-wezterm-escape-parser" }
+tattoy-wezterm-cell = { path = "vendor/tattoy-wezterm-cell" }

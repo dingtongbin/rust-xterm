@@ -2098,8 +2098,6 @@ dependencies = [
 [[package]]
 name = "tattoy-wezterm-cell"
 version = "0.1.0-1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db5ac261e627d60b003c5ee85f9954b532fc7107f5297576029b85189441e7c4"
 dependencies = [
  "finl_unicode",
  "image",
@@ -2155,8 +2153,6 @@ dependencies = [
 [[package]]
 name = "tattoy-wezterm-escape-parser"
 version = "0.1.0-1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ca89ed38092d6718a03e97b0c1101fcf2203c2e6f2757a91c465f393d11d98b"
 dependencies = [
  "base64",
  "bitflags 2.13.1",
