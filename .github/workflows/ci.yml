@@ -16,23 +16,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
   build:
-    name: Build & Test (1.85)
+    name: Build & Test (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Verify rust-version lock
         run: |
-          grep -q 'rust-version = "1.85"' Cargo.toml
+          grep -q 'rust-version = "1.88"' Cargo.toml
           grep -q 'rust-version.workspace = true' crates/rust-xterm-core/Cargo.toml
           grep -q 'rust-version.workspace = true' crates/rust-xterm-renderer/Cargo.toml
           grep -q 'rust-version.workspace = true' crates/rust-xterm-host/Cargo.toml
