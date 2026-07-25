@@ -1,0 +1,43 @@
+# =============================================================================
+# rust-xterm-core: 核心引擎库（无 OS/GUI 依赖）
+# =============================================================================
+# 职责：
+#   1. WezTermCore    — 防腐层，封装 wezterm_term::Terminal
+#   2. CodecGate      — 编码闸门，处理 GBK/UTF-8 边界
+#   3. DamageTracker  — 脏区追踪器
+#   4. TerminalManager — 终极结构体，聚合所有子系统
+# =============================================================================
+
+[package]
+name = "rust-xterm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "rust-xterm core engine: WezTerm-term wrapper, codec gate, damage tracker"
+
+[lib]
+name = "rust_xterm_core"
+path = "src/lib.rs"
+
+[dependencies]
+# tattoy-wezterm-term 的 Rust 模块名为 wezterm_term，这里重命名以匹配
+wezterm_term = { package = "tattoy-wezterm-term", version = "=0.1.0-fork.5" }
+# tattoy-wezterm-surface 提供 CursorShape / CursorVisibility 等类型
+wezterm_surface = { package = "tattoy-wezterm-surface", version = "=0.1.0-fork.2" }
+# wezterm-bidi 提供 ParagraphDirectionHint
+wezterm_bidi = { package = "wezterm-bidi", version = "0.2.3" }
+encoding_rs.workspace = true
+log.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+# 测试时需要 sysinfo 进行内存监控
+sysinfo.workspace = true
+
+# 基准测试
+criterion.workspace = true
+
+[[bench]]
+name = "throughput"
+harness = false

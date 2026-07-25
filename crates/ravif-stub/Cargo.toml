@@ -1,0 +1,40 @@
+# =============================================================================
+# ravif-stub: ravif 0.13.0 的 MSRV 兼容桩
+# =============================================================================
+# 背景：上游 ravif 0.13.0 要求 rust-version = "1.85"（edition 2024），
+# 无法在 rust-xterm 锁定的 Rust 1.72 MSRV 下编译。
+#
+# tattoy-wezterm-term 依赖 image = "0.25" 且未关闭 default features，
+# 导致 image 的 `avif` feature 被启用，传递拉入 ravif → rav1e →
+# av-scenechange → aligned（edition 2024）。
+#
+# wezterm-term 仅使用 image::RgbaImage / image::imageops 处理 sixel/iterm2
+# 图像协议，完全不调用 AVIF 编码。因此用本桩替换 ravif：
+#   - 提供与 ravif 0.13.0 完全一致的公开 API 表面，让 image 0.25.10 编译通过；
+#   - encode_* 方法恒定返回 Error（运行时永远不会被走到）；
+#   - 不依赖任何 edition 2024 / Rust 1.85+ 的 crate，可在 1.72 编译。
+#
+# 通过工作区根 Cargo.toml 的 [patch.crates-io] 启用。
+# =============================================================================
+
+[package]
+name = "ravif"
+version = "0.13.0"
+edition = "2021"
+rust-version = "1.72"
+license = "BSD-3-Clause"
+description = "MSRV-compatible stub replacing ravif 0.13.0 for projects locked to Rust 1.72"
+repository = "https://github.com/dingtongbin/rust-xterm"
+
+[lib]
+name = "ravif"
+path = "src/lib.rs"
+
+[features]
+default = ["asm", "threading"]
+asm = []
+threading = []
+
+[dependencies]
+imgref = "1.12"
+rgb = "0.8"

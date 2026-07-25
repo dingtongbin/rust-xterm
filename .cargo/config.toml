@@ -1,0 +1,7 @@
+[build]
+# Pin job parallelism for reproducible builds
+jobs = 4
+
+[net]
+# Retry on transient network errors during dependency resolution
+retry = 3

@@ -1,0 +1,97 @@
+# =============================================================================
+# rust-xterm 究极工业方案 2.0 — Workspace 根定义
+# =============================================================================
+# 设计哲学：静态确定性、绝对解耦、零开销抽象。
+# 版本铁幕：所有依赖锁定到具体版本，杜绝供应链攻击与破坏性更新。
+# =============================================================================
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/rust-xterm-core",
+    "crates/rust-xterm-renderer",
+    "crates/rust-xterm-host",
+    "crates/ravif-stub",
+]
+
+# -----------------------------------------------------------------------------
+# Workspace 级元数据
+# -----------------------------------------------------------------------------
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.72"
+license = "MIT"
+authors = ["rust-xterm contributors"]
+description = "Industrial-grade terminal emulation library based on WezTerm-term"
+repository = "https://github.com/rust-xterm/rust-xterm"
+
+# -----------------------------------------------------------------------------
+# 版本铁幕：全局依赖版本锁定
+# -----------------------------------------------------------------------------
+[workspace.dependencies]
+# === 核心状态机 ===
+# tattoy-wezterm-term 是 wezterm-term 的 crates.io 发布分支，
+# 源码级剥离自 wezterm 主仓库，提供成熟的 VT 状态机。
+tattoy-wezterm-term = "=0.1.0-fork.5"
+
+# === 编解码闸门 ===
+encoding_rs = "=0.8.33"
+
+# === 渲染后端 ===
+swash = "=0.1.15"
+fontdb = "=0.16.0"
+lru = "=0.12.0"
+
+# === 工具链 ===
+log = "0.4"
+anyhow = "1.0"
+# 注意：wezterm-term 依赖 bitflags 1.x，这里保持兼容
+bitflags = "1.3"
+
+# === PTY 桥接（仅 rust-xterm-host）===
+portable-pty = "0.8"
+
+# === 测试工具 ===
+# 用于 yes 压力测试的内存监控
+sysinfo = "0.30"
+
+# === 基准测试 ===
+criterion = "0.5"
+
+# -----------------------------------------------------------------------------
+# 全局 Profile：十万年稳定性标准
+# -----------------------------------------------------------------------------
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+strip = true
+debug = false
+
+[profile.dev]
+opt-level = 0
+debug = false
+overflow-checks = true
+
+# 测试 profile：兼顾速度与检查
+[profile.test]
+opt-level = 1
+debug = false
+overflow-checks = true
+
+# -----------------------------------------------------------------------------
+# MSRV 补丁：用本地桩替换 edition 2024 的 ravif 0.13.0
+# -----------------------------------------------------------------------------
+# tattoy-wezterm-term 依赖 image = "0.25"（未关 default features），
+# 导致 image 的 `avif` feature 被启用，传递拉入 ravif 0.13.0
+# （rust-version = "1.85"，edition 2024），无法在 rust-xterm 锁定的
+# Rust 1.72 MSRV 下编译。
+#
+# wezterm-term 只用 image::RgbaImage / image::imageops 处理 sixel/iterm2
+# 图像协议，从不进行 AVIF 编码，因此用本地 ravif-stub（API 表面与
+# 上游 0.13.0 完全一致，encode_* 恒返回 Err）替换之。详见
+# crates/ravif-stub/Cargo.toml 的注释。
+[patch.crates-io]
+ravif = { path = "crates/ravif-stub" }

@@ -1,0 +1,21 @@
+[package]
+name = "rust-xterm-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "rust_xterm_host"
+path = "src/lib.rs"
+
+[dependencies]
+rust-xterm-core = { path = "../rust-xterm-core" }
+rust-xterm-renderer = { path = "../rust-xterm-renderer" }
+portable-pty.workspace = true
+log.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+sysinfo.workspace = true
+eframe = "0.31"

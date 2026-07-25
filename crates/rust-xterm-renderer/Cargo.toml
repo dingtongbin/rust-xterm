@@ -1,0 +1,18 @@
+[package]
+name = "rust-xterm-renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "rust_xterm_renderer"
+path = "src/lib.rs"
+
+[dependencies]
+rust-xterm-core = { path = "../rust-xterm-core" }
+swash.workspace = true
+fontdb.workspace = true
+lru.workspace = true
+log.workspace = true
+anyhow.workspace = true
