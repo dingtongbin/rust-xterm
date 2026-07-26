@@ -56,8 +56,7 @@ fn test_repeated_idle_no_cpu_spike() {
     // 证明没有不必要的计算
     assert!(
         elapsed < Duration::from_millis(100),
-        "1000 次空闲轮询耗时: {:?}，应 < 100ms",
-        elapsed
+        "1000 次空闲轮询耗时: {elapsed:?}，应 < 100ms"
     );
 }
 

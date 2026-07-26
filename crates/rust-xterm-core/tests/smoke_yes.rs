@@ -33,7 +33,7 @@ fn test_yes_pressure_stability() {
 
         // 定期轮询帧
         poll_count += 1;
-        if poll_count % 5 == 0 {
+        if poll_count.is_multiple_of(5) {
             let _ = mgr.poll_frame(Instant::now());
         }
     }
@@ -45,8 +45,7 @@ fn test_yes_pressure_stability() {
     // 验证：至少写入了 1MB 数据
     assert!(
         bytes_written > 1_000_000,
-        "应写入大量数据，实际: {} bytes",
-        bytes_written
+        "应写入大量数据，实际: {bytes_written} bytes"
     );
 
     // 验证：屏幕内容正确（应包含 'y' 字符）
@@ -61,10 +60,7 @@ fn test_yes_pressure_stability() {
     assert_eq!(snapshot.size.rows, 24);
     assert_eq!(snapshot.size.cols, 80);
 
-    println!(
-        "yes 压力测试完成: {} bytes 写入, {} 次轮询",
-        bytes_written, poll_count
-    );
+    println!("yes 压力测试完成: {bytes_written} bytes 写入, {poll_count} 次轮询");
 }
 
 #[test]

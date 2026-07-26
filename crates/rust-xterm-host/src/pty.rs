@@ -63,9 +63,9 @@ pub enum PtyError {
 impl std::fmt::Display for PtyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PtyError::CreateFailed(msg) => write!(f, "PTY creation failed: {}", msg),
-            PtyError::SpawnFailed(msg) => write!(f, "Spawn failed: {}", msg),
-            PtyError::Io(e) => write!(f, "IO error: {}", e),
+            PtyError::CreateFailed(msg) => write!(f, "PTY creation failed: {msg}"),
+            PtyError::SpawnFailed(msg) => write!(f, "Spawn failed: {msg}"),
+            PtyError::Io(e) => write!(f, "IO error: {e}"),
         }
     }
 }
@@ -178,7 +178,7 @@ impl PtyBridge {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| PtyError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))
+            .map_err(|e| PtyError::Io(io::Error::other(e.to_string())))
     }
 
     /// 检查读取线程是否存活

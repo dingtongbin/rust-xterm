@@ -54,7 +54,7 @@ fn test_pty_echo_integration() {
 
     // echo 命令可能很快退出，所以 got_frame 可能为 false
     // 关键是不 panic
-    println!("PTY 集成测试完成, got_frame={}", got_frame);
+    println!("PTY 集成测试完成, got_frame={got_frame}");
 }
 
 #[test]

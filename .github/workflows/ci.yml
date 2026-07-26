@@ -16,36 +16,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.72.0
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # ===========================================================================
-  # 核心库：Rust 1.72 MSRV 强锁定
-  # ===========================================================================
-  # rust-xterm-core / rust-xterm-renderer / rust-xterm-host 三个库 crate 必须在
-  # Rust 1.72 下编译、测试、clippy 全部通过。这是项目文档要求的
-  # "Rust 1.72 强锁定" 承诺。
-  #
-  # 注意：不使用 --all-targets，因为 --all-targets 会把 examples 也纳入
-  # 检查，而 examples 可能依赖 GUI 框架（拉入 edition 2024 的依赖），
-  # 无法在 1.72 下编译。demo 由下方的 demo job 单独用 stable 检查。
-  # ===========================================================================
-  core-msrv:
-    name: Core (1.72 strict lock)
+  build:
+    name: Build & Test (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.72.0
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Verify rust-version lock
         run: |
-          # Workspace root pins the MSRV
-          grep -q 'rust-version = "1.72"' Cargo.toml
-          # Every library crate must inherit the locked MSRV from the workspace
+          grep -q 'rust-version = "1.88"' Cargo.toml
           grep -q 'rust-version.workspace = true' crates/rust-xterm-core/Cargo.toml
           grep -q 'rust-version.workspace = true' crates/rust-xterm-renderer/Cargo.toml
           grep -q 'rust-version.workspace = true' crates/rust-xterm-host/Cargo.toml
@@ -55,30 +42,9 @@ jobs:
           grep -q '#!\[forbid(unsafe_code)\]' crates/rust-xterm-renderer/src/lib.rs
           grep -q '#!\[forbid(unsafe_code)\]' crates/rust-xterm-host/src/lib.rs
           ! grep -rn 'unsafe ' crates/*/src/ | grep -v '//'
-      - name: Build core libraries (no examples)
-        run: cargo build -p rust-xterm-core -p rust-xterm-renderer -p rust-xterm-host
-      - name: Clippy core libraries (no examples)
-        run: cargo clippy -p rust-xterm-core -p rust-xterm-renderer -p rust-xterm-host -- -D warnings
-      - name: Test core libraries
-        run: cargo test -p rust-xterm-core -p rust-xterm-renderer -p rust-xterm-host
-
-  # ===========================================================================
-  # Demo / Examples：最新 stable
-  # ===========================================================================
-  # examples 可能依赖 GUI 框架，这些框架的传递依赖（indexmap 等）
-  # 已升级到 edition 2024，无法在 1.72 下编译。demo 不参与 MSRV 强锁定
-  # 承诺，用最新 stable 单独检查。
-  # ===========================================================================
-  demo:
-    name: Demo (stable)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Build examples
-        run: cargo build --examples
-      - name: Clippy examples
-        run: cargo clippy --examples -- -D warnings
+      - name: Build all targets
+        run: cargo build --all-targets
+      - name: Clippy all targets
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test all targets
+        run: cargo test --all-targets
