@@ -47,7 +47,7 @@
 
 | 功能特性点 | 达成标准（计划） | 实现状态 | 证据 / 缺口 |
 | :--- | :--- | :--- | :--- |
-| 内联图像协议 | Sixel + iTerm2 Inline Image，光栅化到流 | **未实现** | 无 sixel/iterm2 解析，`RustXtermCell` 无图像字段；`ravif-stub` 仅为绕过 MSRV 编译的占位（见根 `Cargo.toml:85-96`），`encode_*` 恒返回 Err。 |
+| 内联图像协议 | Sixel + iTerm2 Inline Image，光栅化到流 | **未实现** | 无 sixel/iterm2 解析，`RustXtermCell` 无图像字段。MSRV 升级到 1.88 后已移除 `ravif-stub`，使用上游真实 `ravif` 依赖；但终端场景下 `encode_*` 路径仍不会被走到。 |
 | 图像状态管理 | 图像与文本层叠、随文本滚动、选区逻辑 | **未实现** | 无任何图像模型。 |
 
 ---
@@ -136,7 +136,7 @@
 5. **OSC 7 / 焦点报告 仍缺口** — OSC 8 hyperlink 字段已透传、OSC 52 已接线 emit `ClipboardRequest`；OSC 7 CWD 仍未暴露，焦点报告（DECSET 1004）仍未实现。
 6. **核心层键盘映射缺失** — 宿主必须自行编码 keystroke→CSI，缺乏统一映射表。
 7. **IME 预编辑完全缺失** — 无 composition 状态。
-8. **图像协议（Sixel/iTerm2）完全缺失** — `ravif-stub` 仅为 MSRV 绕行桩，非功能实现。
+8. **图像协议（Sixel/iTerm2）完全缺失** — MSRV 升级到 1.88 后已移除 `ravif-stub` 绕行桩，改用上游真实 `ravif` 依赖；但 Sixel/iTerm2 解析与图像状态管理仍未实现。
 
 ---
 
