@@ -41,10 +41,95 @@ pub struct PtyConfig {
 impl Default for PtyConfig {
     fn default() -> Self {
         Self {
-            shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
+            shell: Self::detect_default_shell(),
             cols: 80,
             rows: 24,
             cwd: None,
+        }
+    }
+}
+
+impl PtyConfig {
+    /// 自动检测当前操作系统上可用的 shell
+    ///
+    /// 检测顺序：
+    /// - **Unix (Linux)**：优先采纳 `SHELL` 环境变量（仅当指向的可执行文件存在），
+    ///   否则按 `/bin/zsh` → `/usr/bin/zsh` → `/bin/bash` → `/usr/bin/bash`
+    ///   → `/bin/sh` → `/usr/bin/sh` 顺序探测文件存在性，返回第一个命中。
+    /// - **Unix (macOS)**：优先采纳 `SHELL` 环境变量，否则按 `/bin/zsh`
+    ///   → `/usr/local/bin/zsh` → `/opt/homebrew/bin/zsh` → `/bin/bash`
+    ///   → `/usr/local/bin/bash` → `/bin/sh` 顺序探测。
+    /// - **Windows**：依次用 `where` 探测 `pwsh.exe`（PowerShell 7+）/
+    ///   `powershell.exe`（Windows PowerShell）/ `cmd.exe`，返回第一个命中。
+    ///
+    /// 兜底：Unix 回退到 `/bin/sh`，Windows 回退到 `cmd.exe`。
+    ///
+    /// 本方法不引入任何新依赖，仅使用 `std::path::Path::exists`（Unix）
+    /// 与 `std::process::Command::new("where")`（Windows）。
+    pub fn detect_default_shell() -> String {
+        #[cfg(unix)]
+        {
+            use std::path::Path;
+
+            // 1. 优先采纳 SHELL 环境变量（仅当指向的可执行文件确实存在，
+            //    避免 $SHELL 指向已卸载的 shell 时启动失败）
+            if let Ok(shell) = std::env::var("SHELL") {
+                if !shell.is_empty() && Path::new(&shell).exists() {
+                    return shell;
+                }
+            }
+
+            // 2. 按候选路径探测
+            let candidates: &[&str] = if cfg!(target_os = "macos") {
+                &[
+                    "/bin/zsh",
+                    "/usr/local/bin/zsh",
+                    "/opt/homebrew/bin/zsh",
+                    "/bin/bash",
+                    "/usr/local/bin/bash",
+                    "/bin/sh",
+                ]
+            } else {
+                &[
+                    "/bin/zsh",
+                    "/usr/bin/zsh",
+                    "/bin/bash",
+                    "/usr/bin/bash",
+                    "/bin/sh",
+                    "/usr/bin/sh",
+                ]
+            };
+            for c in candidates {
+                if Path::new(c).exists() {
+                    return (*c).to_string();
+                }
+            }
+
+            // 3. 兜底
+            "/bin/sh".to_string()
+        }
+        #[cfg(windows)]
+        {
+            // Windows: 依次用 where 探测 pwsh.exe / powershell.exe / cmd.exe
+            for c in &["pwsh.exe", "powershell.exe", "cmd.exe"] {
+                if let Ok(out) = std::process::Command::new("where").arg(c).output() {
+                    if out.status.success() {
+                        let s = String::from_utf8_lossy(&out.stdout);
+                        if let Some(line) = s.lines().next() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                return trimmed.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+            // 兜底
+            "cmd.exe".to_string()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            "/bin/sh".to_string()
         }
     }
 }
@@ -194,5 +279,44 @@ impl Drop for PtyBridge {
     fn drop(&mut self) {
         // 关闭 writer 以触发子进程退出
         let _ = self.writer.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_default_shell_returns_nonempty() {
+        let shell = PtyConfig::detect_default_shell();
+        assert!(!shell.is_empty(), "detect_default_shell 不应返回空字符串");
+    }
+
+    #[test]
+    fn test_detect_default_shell_exists_on_unix() {
+        // Unix 平台：检测到的 shell 路径应确实存在（除非是兜底值）。
+        #[cfg(unix)]
+        {
+            let shell = PtyConfig::detect_default_shell();
+            let exists = std::path::Path::new(&shell).exists();
+            assert!(
+                exists || shell == "/bin/sh",
+                "shell '{shell}' 既不存在也不是兜底值 /bin/sh"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            // 非 Unix 平台：仅断言非空
+            let _ = PtyConfig::detect_default_shell();
+        }
+    }
+
+    #[test]
+    fn test_default_config_uses_detected_shell() {
+        let cfg = PtyConfig::default();
+        assert!(!cfg.shell.is_empty());
+        assert_eq!(cfg.cols, 80);
+        assert_eq!(cfg.rows, 24);
+        assert!(cfg.cwd.is_none());
     }
 }

@@ -28,6 +28,8 @@ export component App inherits Window {
     callback key-pressed-cb(string, bool, bool, bool);
     // 鼠标：x, y, kind(0=down/1=up/2=move/3=exit), button(0=none/1=left/2=right/3=middle)
     callback pointer-event-cb(float, float, int, int);
+    // 滚轮：delta-y（正值向上滚，负值向下滚，单位 px）
+    callback scroll-cb(float);
 
     // 将窗口焦点转发到 FocusScope
     forward-focus: key-handler;
@@ -60,6 +62,11 @@ export component App inherits Window {
                         kind-to-int(e.kind),
                         button-to-int(e.button)
                     );
+                }
+
+                scroll-event(e) => {
+                    scroll-cb(e.delta-y / 1px);
+                    accept
                 }
             }
         }

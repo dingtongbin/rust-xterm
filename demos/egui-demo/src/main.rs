@@ -116,7 +116,8 @@ impl TerminalApp {
 
         // 终端管理器 + PTY
         let manager = TerminalManager::utf8(TerminalSize::new(rows, cols));
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell = PtyConfig::detect_default_shell();
+        eprintln!("[egui-demo] detected shell: {shell}");
         let pty_cfg = PtyConfig {
             shell: shell.clone(),
             cols: cols as u16,

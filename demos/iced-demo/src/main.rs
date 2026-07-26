@@ -85,6 +85,8 @@ struct App {
     clipboard: Option<Clipboard>,
     /// 是否请求退出
     should_exit: bool,
+    /// 当前键盘修饰键状态（由 key-press 维护，供鼠标事件读取，支持 Alt+拖拽矩形选区）
+    current_mods: KeyMods,
 }
 
 /// FPS 滑动平均追踪器
@@ -147,7 +149,8 @@ enum Message {
 
 impl App {
     fn new() -> (Self, Task<Message>) {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell = PtyConfig::detect_default_shell();
+        eprintln!("[iced-demo] detected shell: {shell}");
 
         let mgr = TerminalManager::utf8(TerminalSize::new(INIT_ROWS as usize, INIT_COLS as usize));
         let pty_cfg = PtyConfig {
@@ -213,6 +216,7 @@ impl App {
             last_canvas: (canvas_w, canvas_h),
             clipboard,
             should_exit: false,
+            current_mods: KeyMods::default(),
         };
         (app, Task::none())
     }
@@ -246,19 +250,36 @@ impl App {
                     alt: mods.alt(),
                     ctrl: mods.control(),
                 };
+                // 保存修饰键状态，供鼠标事件读取
+                self.current_mods = keymods;
                 if let Some(input) = map_key(&key) {
                     let _ = self.event_loop.send_key(input, keymods);
                 } else if let Key::Character(s) = &key {
-                    // 普通字符直接走 send_input（KeyMapping 也会处理，
-                    // 但走 send_input 可保留多字节 UTF-8 字符）
-                    if mods.control() || mods.alt() {
-                        if let Some(input) = map_key(&key) {
-                            let _ = self.event_loop.send_key(input, keymods);
+                    // 普通字符直接走 send_input（保留多字节 UTF-8 字符）
+                    if mods.control() && !mods.alt() {
+                        // Ctrl+字母 → 用 KeyMapping 保证一致编码（如 Ctrl+C = ETX）
+                        if let Some(ch) = s.chars().next() {
+                            let input = KeyInput::Char(ch.to_ascii_lowercase());
+                            let data = rust_xterm_core::input::KeyMapping::encode_key(
+                                input, keymods, false,
+                            );
+                            let _ = self.event_loop.send_input(&data);
                         }
-                    } else if let Some(ch) = s.chars().next() {
-                        let mut buf = [0u8; 4];
-                        let s = ch.encode_utf8(&mut buf);
+                    } else if mods.alt() && !mods.control() {
+                        // Alt+字符 → ESC 前缀（仅 ASCII 单字节）
+                        let bytes = s.as_bytes();
+                        if bytes.len() == 1 && bytes[0] < 0x80 {
+                            let mut data = vec![0x1b];
+                            data.extend_from_slice(bytes);
+                            let _ = self.event_loop.send_input(&data);
+                        } else {
+                            // Alt+多字节字符：直接发送
+                            let _ = self.event_loop.send_input(bytes);
+                        }
+                    } else {
+                        // 无修饰键：发送完整字符串（支持 CJK / IME 组合输出）
                         let _ = self.event_loop.send_input(s.as_bytes());
+                        self.scroll_offset = 0;
                     }
                 }
             }
@@ -294,7 +315,7 @@ impl App {
                         y,
                         MouseAction::Move,
                         MouseButton::Left,
-                        KeyMods::default(),
+                        self.current_mods,
                     );
                 }
             }
@@ -306,7 +327,7 @@ impl App {
                         y,
                         MouseAction::Press,
                         MouseButton::Left,
-                        KeyMods::default(),
+                        self.current_mods,
                     );
                 }
             }
@@ -318,7 +339,7 @@ impl App {
                         y,
                         MouseAction::Release,
                         MouseButton::Left,
-                        KeyMods::default(),
+                        self.current_mods,
                     );
                     // 选区文本复制到剪贴板
                     if let Some(text) = self.event_loop.manager_ref().selection_text() {
