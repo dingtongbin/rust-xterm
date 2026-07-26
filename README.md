@@ -4,7 +4,7 @@
   <p align="center">
     <a href="https://github.com/dingtongbin/rust-xterm/actions"><img alt="CI" src="https://github.com/dingtongbin/rust-xterm/actions/workflows/ci.yml/badge.svg"></a>
     <a href="https://docs.rs/rust-xterm-core"><img alt="docs.rs" src="https://docs.rs/rust-xterm-core/badge.svg"></a>
-    <img alt="Rust 1.72+" src="https://img.shields.io/badge/rust-1.72%2B-orange.svg">
+    <img alt="Rust 1.88+" src="https://img.shields.io/badge/rust-1.88%2B-orange.svg">
     <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg">
     <img alt="unsafe forbidden" src="https://img.shields.io/badge/unsafe-forbidden-success.svg">
   </p>
@@ -97,7 +97,7 @@ See `examples/` for a headless demo and `crates/rust-xterm-host` for a `portable
 | Guarantee                | How it is enforced                                             |
 |--------------------------|----------------------------------------------------------------|
 | No `unsafe`              | `#![forbid(unsafe_code)]` on all crate roots + CI grep check   |
-| Rust 1.72 strict lock    | `rust-version = "1.72"` in every `[package]` + CI `+1.72.0`    |
+| Rust 1.88 strict lock    | `rust-version = "1.88"` in workspace root + CI `+1.88.0`     |
 | Bounded memory           | Fixed-size atlas, bounded scrollback, LRU eviction             |
 | 0% CPU at idle           | `poll_frame` returns `None` when no damage and no blink due    |
 | No data races            | Single-owner `&mut self` model, no `Arc<Mutex>` on hot path    |
