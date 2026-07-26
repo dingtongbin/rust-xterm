@@ -103,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let size = rust_xterm_core::TerminalSize::new(INITIAL_ROWS, INITIAL_COLS);
     let manager = rust_xterm_core::TerminalManager::utf8(size);
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let shell = PtyConfig::detect_default_shell();
+    eprintln!("[slint-demo] detected shell: {shell}");
     let pty_config = PtyConfig {
         shell,
         cols: INITIAL_COLS as u16,

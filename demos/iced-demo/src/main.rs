@@ -147,7 +147,8 @@ enum Message {
 
 impl App {
     fn new() -> (Self, Task<Message>) {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell = PtyConfig::detect_default_shell();
+        eprintln!("[iced-demo] detected shell: {shell}");
 
         let mgr = TerminalManager::utf8(TerminalSize::new(INIT_ROWS as usize, INIT_COLS as usize));
         let pty_cfg = PtyConfig {
