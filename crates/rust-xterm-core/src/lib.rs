@@ -68,6 +68,12 @@ pub mod addon;
 /// 鼠标事件抽象（xterm.js 风格）
 pub mod mouse;
 
+/// 键盘映射核心层（xterm.js 风格）
+pub mod input;
+
+/// 选区系统模型（xterm.js 风格）
+pub mod selection;
+
 /// GUI 集成抽象
 pub mod integration;
 
@@ -82,11 +88,13 @@ pub use codec_gate::{Codec, CodecGate, CodecStats};
 pub use config::{RustXtermConfig, RustXtermConfigBuilder};
 pub use damage::{DamageTracker, DirtyRect};
 pub use events::{EventBus, EventSubscription, TerminalEvent};
+pub use input::{KeyInput, KeyMapping};
 pub use integration::{InputSource, NullRenderSurface, RenderMetrics, RenderSurface, SizeSource};
 pub use manager::{DirtyRow, FrameUpdate, TerminalManager};
-pub use mouse::{KeyMods, MouseAction, MouseButton};
+pub use mouse::{KeyMods, MouseAction, MouseButton, MouseState};
 pub use null_writer::{CapturingWriter, NullWriter, OutputBuffer};
 pub use parser::Parser;
+pub use selection::SelectionRange;
 pub use state::RuntimeState;
 pub use theme::WindowsTerminalTheme;
 pub use wezterm_core::{ScreenSnapshot, WezTermCore};

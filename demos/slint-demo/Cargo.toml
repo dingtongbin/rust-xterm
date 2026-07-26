@@ -1,0 +1,31 @@
+# =============================================================================
+# slint-demo: 独立的 Slint GUI demo，集成 rust-xterm 终端库
+# =============================================================================
+# 依赖隔离硬约束：
+#   - 不加入 /workspace/Cargo.toml 的 members
+#   - 独立 Cargo.lock
+#   - GUI 依赖 slint 只写在此处，不用 .workspace = true
+#   - 引用 rust-xterm 库 crate 用相对 path
+# =============================================================================
+
+[package]
+name = "slint-demo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+slint-build = "1.6"
+
+[dependencies]
+slint = "1.6"
+sysinfo = "0.30"
+arboard = "3"
+rust-xterm-core = { path = "../../crates/rust-xterm-core" }
+rust-xterm-renderer = { path = "../../crates/rust-xterm-renderer" }
+rust-xterm-host = { path = "../../crates/rust-xterm-host" }
+
+# 开发时使用软件渲染后端，避免在无 GPU 环境下链接 OpenGL/EGL
+# （默认 features 已包含 backend-winit + renderer-femtovg；在 headless CI 中编译即可）

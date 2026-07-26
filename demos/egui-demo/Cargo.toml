@@ -1,0 +1,33 @@
+# =============================================================================
+# egui-demo: 独立的 egui + rust-xterm 终端 demo
+# =============================================================================
+# 依赖隔离硬约束：
+#   - 本 crate 不加入 /workspace/Cargo.toml 的 members
+#   - 拥有独立 Cargo.lock（见下方 [workspace] 表，使本 crate 成为自身工作区根，
+#     阻止 cargo 向上查找 /workspace 的 workspace）
+#   - GUI 依赖直接写版本号，不使用 .workspace = true
+#   - rust-xterm 库通过 path 引用
+# =============================================================================
+
+[package]
+name = "egui-demo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+sysinfo = "0.30"
+arboard = "3"
+rust-xterm-core = { path = "../../crates/rust-xterm-core" }
+rust-xterm-renderer = { path = "../../crates/rust-xterm-renderer" }
+rust-xterm-host = { path = "../../crates/rust-xterm-host" }
+
+# -----------------------------------------------------------------------------
+# 独立工作区声明：使本 crate 成为自身的工作区根，
+# 从而与 /workspace 的 workspace 完全解耦，拥有独立 Cargo.lock。
+# -----------------------------------------------------------------------------
+[workspace]

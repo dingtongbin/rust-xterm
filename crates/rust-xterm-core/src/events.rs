@@ -15,6 +15,7 @@
 //! | `on_selection_change` | 选区变更 | `onSelectionChange` |
 
 use crate::{CursorMeta, TerminalSize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,21 @@ pub enum TerminalEvent {
         /// 返回的 RGB 颜色
         color: (u8, u8, u8),
     },
+    /// 焦点报告（DECSET 1004）
+    ///
+    /// 当应用启用焦点报告模式后，宿主调用 [`crate::TerminalManager::set_focused`]
+    /// 触发：`true` 表示获得焦点（终端响应 `\x1b[I`），`false` 表示失去焦点
+    /// （终端响应 `\x1b[O`）。响应字节通过 [`crate::TerminalManager::drain_output`] 取出。
+    FocusReport(bool),
+    /// 当前工作目录变更（OSC 7）
+    ///
+    /// 当应用发送 `OSC 7 ; file://<host>/<path> BEL` 时触发，
+    /// payload 为解析后的本地路径。
+    CwdChange(PathBuf),
+    /// 选区已完成（鼠标释放时触发）
+    ///
+    /// 宿主可在此时读取 [`crate::TerminalManager::selection_text`] 获取选中文本。
+    SelectionReady,
 }
 
 /// 事件回调函数类型

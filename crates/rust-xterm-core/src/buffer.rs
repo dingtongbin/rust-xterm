@@ -14,6 +14,7 @@
 //! xterm.js 有 normal 和 alternate 两个 buffer。
 
 use crate::cell::RustXtermCell;
+use crate::selection::SelectionRange;
 
 /// Marker：scrollback 中的位置标记
 ///
@@ -200,6 +201,166 @@ impl BufferNamespace {
 impl Default for BufferNamespace {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// 选区文本提取（Task 5）
+// ============================================================================
+
+/// 提取选区文本
+///
+/// 从屏幕行数据 `rows` 中按 [`SelectionRange`] 提取文本。
+///
+/// - **线性选区**（`rectangular = false`）：按起点终点排序后跨行连接，
+///   首行从起点列到行尾，中间行整行，末行从行首到终点列，行间以 `\n` 分隔。
+/// - **矩形选区**（`rectangular = true`）：每行独立按列范围 `[min, max]` 截取，
+///   行间以 `\n` 分隔。
+///
+/// 坐标为 `(row, col)` 0-based，越界坐标自动 clamp。
+pub fn selection_text(range: SelectionRange, rows: &[Vec<RustXtermCell>]) -> String {
+    let (sr, sc) = range.start;
+    let (er, ec) = range.end;
+
+    if range.rectangular {
+        let (r1, r2) = (sr.min(er), sr.max(er));
+        let (c1, c2) = (sc.min(ec), sc.max(ec));
+        let mut out = String::new();
+        for r in r1..=r2 {
+            if r > r1 {
+                out.push('\n');
+            }
+            let row_len = rows.get(r).map_or(0, Vec::len);
+            if row_len == 0 {
+                continue;
+            }
+            let cs = c1.min(row_len);
+            let ce = c2.min(row_len.saturating_sub(1));
+            if let Some(row) = rows.get(r) {
+                for c in cs..=ce {
+                    if let Some(cell) = row.get(c) {
+                        out.push_str(&cell.text);
+                    }
+                }
+            }
+        }
+        out
+    } else {
+        // 线性选区：先按 (row, col) 字典序排序起点终点
+        let ((sr, sc), (er, ec)) = if (sr, sc) <= (er, ec) {
+            ((sr, sc), (er, ec))
+        } else {
+            ((er, ec), (sr, sc))
+        };
+        let mut out = String::new();
+        for r in sr..=er {
+            if r > sr {
+                out.push('\n');
+            }
+            let row_len = rows.get(r).map_or(0, Vec::len);
+            if row_len == 0 {
+                continue;
+            }
+            let col_start = if r == sr { sc.min(row_len) } else { 0 };
+            let col_end = if r == er {
+                ec.min(row_len.saturating_sub(1))
+            } else {
+                row_len.saturating_sub(1)
+            };
+            if let Some(row) = rows.get(r) {
+                for c in col_start..=col_end {
+                    if let Some(cell) = row.get(c) {
+                        out.push_str(&cell.text);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+// ============================================================================
+// 智能选区扩展（Task 6）
+// ============================================================================
+
+/// 字符类别（用于智能选词边界判定）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    /// 空白
+    Whitespace,
+    /// 字母数字
+    Alphanumeric,
+    /// 标点
+    Punctuation,
+}
+
+/// 判定一个 Cell 的字符类别
+///
+/// 取 Cell 文本的第一个字符归类；空文本（空白 Cell）归为 `Whitespace`。
+/// 三类划分遵循 `is_whitespace` / `is_alphanumeric` / 其余归为标点。
+fn cell_class(cell: &RustXtermCell) -> CharClass {
+    match cell.text.chars().next() {
+        None => CharClass::Whitespace,
+        Some(c) if c.is_whitespace() => CharClass::Whitespace,
+        Some(c) if c.is_alphanumeric() => CharClass::Alphanumeric,
+        Some(_) => CharClass::Punctuation,
+    }
+}
+
+/// 智能选词：从 `pos` 向左右扩展，直到字符类别边界
+///
+/// 坐标 `pos = (row, col)` 0-based。返回同一行内的线性选区。
+/// 点击位置 Cell 的类别决定扩展方向上的同类边界。
+pub fn select_word(pos: (usize, usize), rows: &[Vec<RustXtermCell>]) -> SelectionRange {
+    let (row, col) = pos;
+    let row_cells = rows.get(row);
+    let class = row_cells
+        .and_then(|r| r.get(col))
+        .map_or(CharClass::Whitespace, cell_class);
+    let row_len = row_cells.map_or(0, Vec::len);
+
+    // 向左扩展
+    let mut left = col;
+    while left > 0 {
+        let same = row_cells
+            .and_then(|r| r.get(left - 1))
+            .is_some_and(|c| cell_class(c) == class);
+        if same {
+            left -= 1;
+        } else {
+            break;
+        }
+    }
+    // 向右扩展
+    let mut right = col;
+    while right + 1 < row_len {
+        let same = row_cells
+            .and_then(|r| r.get(right + 1))
+            .is_some_and(|c| cell_class(c) == class);
+        if same {
+            right += 1;
+        } else {
+            break;
+        }
+    }
+    SelectionRange {
+        start: (row, left),
+        end: (row, right),
+        rectangular: false,
+    }
+}
+
+/// 选整行：从第 0 列到最后一列
+///
+/// 坐标 `pos = (row, col)` 0-based，仅 `row` 生效。返回覆盖整行的线性选区。
+pub fn select_line(pos: (usize, usize), rows: &[Vec<RustXtermCell>]) -> SelectionRange {
+    let (row, _col) = pos;
+    let cols = rows.get(row).map_or(0, Vec::len);
+    let last = cols.saturating_sub(1);
+    SelectionRange {
+        start: (row, 0),
+        end: (row, last),
+        rectangular: false,
     }
 }
 

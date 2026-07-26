@@ -38,6 +38,18 @@ pub struct WezTermCore {
     size: TerminalSize,
     /// 终端输出捕获缓冲区（鼠标报告、查询响应等）
     output_buffer: OutputBuffer,
+    /// 焦点报告模式（DECSET 1004）是否启用
+    ///
+    /// WezTerm 内部以私有字段 `focus_tracking` 维护此状态，
+    /// 未暴露查询 API，故在此镜像一份供 [`Self::is_focus_reporting_enabled`] 使用。
+    /// 在 [`Self::advance_bytes`] 中扫描 `\x1b[?1004h` / `\x1b[?1004l` 维护。
+    focus_reporting_enabled: bool,
+    /// 当前滚动区域（DECSTBM），1-based `(top, bottom)`，`None` 表示全屏
+    ///
+    /// WezTerm 内部以私有字段 `top_and_bottom_margins` 维护，
+    /// 未暴露查询 API，故在此镜像一份供 [`Self::scroll_region`] 使用。
+    /// 在 [`Self::advance_bytes`] 中扫描 `\x1b[<top>;<bottom>r` 维护。
+    scroll_region: Option<(usize, usize)>,
 }
 
 impl WezTermCore {
@@ -70,6 +82,8 @@ impl WezTermCore {
             _config: config_arc,
             size,
             output_buffer,
+            focus_reporting_enabled: false,
+            scroll_region: None,
         }
     }
 
@@ -114,7 +128,13 @@ impl WezTermCore {
     ///
     /// WezTerm 内部解析 ANSI 转义序列，更新 Grid。
     /// 此方法立即返回，不触发渲染。
+    ///
+    /// 同时镜像扫描焦点报告（DECSET 1004）与滚动区域（DECSTBM）序列，
+    /// 维护 [`Self::focus_reporting_enabled`] 与 [`Self::scroll_region`] 状态，
+    /// 因为 WezTerm 未公开这两个字段的查询 API。
     pub fn advance_bytes(&mut self, bytes: &str) {
+        // 先扫描镜像状态，再喂入 WezTerm（WezTerm 也会处理这些序列，互不干扰）
+        self.scan_csi_state(bytes.as_bytes());
         self.terminal.advance_bytes(bytes);
     }
 
@@ -129,6 +149,94 @@ impl WezTermCore {
         };
         self.terminal.resize(wz_size);
         self.size = size;
+        // 尺寸变化后缓存的滚动区域可能越界，重置为全屏
+        self.scroll_region = None;
+    }
+
+    /// 是否启用了焦点报告模式（DECSET 1004）
+    ///
+    /// 当应用发送 `\x1b[?1004h` 时启用，`\x1b[?1004l` 时禁用。
+    pub fn is_focus_reporting_enabled(&self) -> bool {
+        self.focus_reporting_enabled
+    }
+
+    /// 通知终端焦点状态变化
+    ///
+    /// 若启用了焦点报告模式（DECSET 1004），WezTerm 会向输出缓冲写入
+    /// `\x1b[I`（`focused = true`）或 `\x1b[O`（`focused = false`），
+    /// 宿主在下次 [`Self::drain_output`] 即可取出转发给 PTY。
+    ///
+    /// 委托给 WezTerm 的 `focus_changed`，同时更新其内部焦点状态
+    /// （用于 `has_unseen_output` 等）。
+    pub fn set_focused(&mut self, focused: bool) {
+        self.terminal.focus_changed(focused);
+    }
+
+    /// 获取当前滚动区域（DECSTBM），1-based `(top, bottom)`
+    ///
+    /// 返回 `None` 表示全屏（未设置 DECSTBM 或已重置）。
+    /// 坐标为 1-based，与 DECSTBM 序列参数一致。
+    pub fn scroll_region(&self) -> Option<(usize, usize)> {
+        self.scroll_region
+    }
+
+    /// 扫描 CSI 序列以镜像维护焦点报告与滚动区域状态
+    ///
+    /// 仅识别两类序列：
+    /// - `\x1b[?1004h` / `\x1b[?1004l`：DECSET/DECRST 1004
+    /// - `\x1b[<top>;<bottom>r`：DECSTBM（空参数表示重置为全屏）
+    ///
+    /// 此扫描不消耗输入（WezTerm 仍会正常处理这些序列），
+    /// 仅用于维护本地镜像状态以支持查询 API。
+    fn scan_csi_state(&mut self, bytes: &[u8]) {
+        let mut i = 0;
+        let len = bytes.len();
+        while i < len {
+            // 识别 CSI 起点：ESC [ (0x1b 0x5b)
+            if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == 0x5b {
+                let start = i + 2;
+                let mut j = start;
+                // 参数字节：0x30..=0x3f（含数字、';'、':'、'?'、'<'、'='、'>'）
+                while j < len && (0x30..=0x3f).contains(&bytes[j]) {
+                    j += 1;
+                }
+                let param_bytes = &bytes[start..j];
+                // 中间字节：0x20..=0x2f
+                while j < len && (0x20..=0x2f).contains(&bytes[j]) {
+                    j += 1;
+                }
+                // 最终字节：0x40..=0x7e
+                if j < len && (0x40..=0x7e).contains(&bytes[j]) {
+                    let final_byte = bytes[j];
+                    // 区分私有序列（以 '?' 开头）
+                    let (is_private, params) = if !param_bytes.is_empty() && param_bytes[0] == b'?'
+                    {
+                        (true, &param_bytes[1..])
+                    } else {
+                        (false, param_bytes)
+                    };
+                    if is_private {
+                        // DECSET/DECRST：final byte 'h' 或 'l'
+                        if final_byte == b'h' || final_byte == b'l' {
+                            if let Some(code) = parse_first_uint(params) {
+                                if code == 1004 {
+                                    self.focus_reporting_enabled = final_byte == b'h';
+                                }
+                            }
+                        }
+                    } else if final_byte == b'r' {
+                        // DECSTBM
+                        self.scroll_region = parse_decstbm(params, self.size.rows);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                // 不完整的 CSI，跳过 ESC
+                i += 1;
+                continue;
+            }
+            i += 1;
+        }
     }
 
     /// 获取当前尺寸
@@ -436,4 +544,62 @@ fn convert_cursor_shape(shape: wezterm_surface::CursorShape) -> CursorShape {
         WzShape::BlinkingUnderline | WzShape::SteadyUnderline => CursorShape::Underline,
         WzShape::BlinkingBar | WzShape::SteadyBar => CursorShape::Bar,
     }
+}
+
+/// 解析 CSI 参数字节中第一个分号前的无符号整数
+///
+/// 用于 DECSET/DECRST 的私有模式码解析，如 `1004` 来自 `1004` 或 `1004;...`。
+/// 返回 `None` 表示无数字（默认值）。
+fn parse_first_uint(params: &[u8]) -> Option<u32> {
+    let end = params
+        .iter()
+        .position(|&b| b == b';')
+        .unwrap_or(params.len());
+    let s = &params[..end];
+    if s.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(s)
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// 解析 DECSTBM（Set Top and Bottom Margins）参数为 1-based `(top, bottom)`
+///
+/// 参数形如 `<top>;<bottom>`，缺省时 `top = 1`，`bottom = rows`。
+/// - 空参数 → `None`（重置为全屏）
+/// - `top >= bottom` → `None`（无效，WezTerm 会忽略）
+/// - 等价于全屏（`top == 1 && bottom == rows`）→ `None`
+fn parse_decstbm(params: &[u8], rows: usize) -> Option<(usize, usize)> {
+    // 空参数：重置为全屏
+    if params.is_empty() {
+        return None;
+    }
+    let mut parts = params.split(|&b| b == b';');
+    let top = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| {
+            std::str::from_utf8(s)
+                .ok()
+                .and_then(|t| t.parse::<usize>().ok())
+        })
+        .unwrap_or(1);
+    let bottom = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| {
+            std::str::from_utf8(s)
+                .ok()
+                .and_then(|t| t.parse::<usize>().ok())
+        })
+        .unwrap_or(rows);
+    if top >= bottom || bottom > rows {
+        return None;
+    }
+    // 等价于全屏则视为未设置
+    if top == 1 && bottom == rows {
+        return None;
+    }
+    Some((top, bottom))
 }
