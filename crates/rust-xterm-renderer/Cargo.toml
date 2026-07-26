@@ -11,8 +11,13 @@ path = "src/lib.rs"
 
 [dependencies]
 rust-xterm-core = { path = "../rust-xterm-core" }
-swash.workspace = true
+# swash 放宽为 caret：保留 0.1.15 下界（与 workspace 锁一致），
+# 允许 0.1.x 新版本，以便独立 demo（iced-demo，经 cosmic-text 需要 ^0.1.17）解析。
+# workspace 构建仍锁定 0.1.15（Cargo.lock sticky），不受影响。
+swash = "0.1.15"
 fontdb.workspace = true
-lru.workspace = true
+# lru 放宽为 caret：保留 0.12.0 下界（与 workspace 锁一致），
+# 允许 0.12.x 新版本，以便 iced-demo（经 iced_glyphon 需要 ^0.12.1）解析。
+lru = "0.12"
 log.workspace = true
 anyhow.workspace = true
