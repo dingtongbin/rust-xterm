@@ -311,11 +311,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // ---- 8. 滚轮回调（指针事件已包含 down/up/move，但滚轮需单独转发）----
-    // Slint TouchArea 的 scrolled 信号不可用（仅 ScrollView 有），这里在
-    // 主定时器中通过 winit 的 MouseScrollDelta 不可达 —— 故 slint 1.6 暂不支持
-    // 滚轮。如需滚轮，可在后续版本通过 Window::on_wheel（slint ≥1.2）接入。
-    // 当前实现仅支持键盘 / 鼠标左键选区 / 中键粘贴 / resize。
+    // ---- 8. 滚轮 scrollback 回调 ----
+    // Slint 1.6 的 TouchArea 提供 scroll-event 回调（PointerScrollEvent.delta-y）。
+    // 正值表示向上滚（手指向后推），负值表示向下滚。
+    // 按 CELL_H 像素 / 行换算为行数，调整 scroll_offset（夹在 [0, max_scrollback]）。
+    let ctx_wheel = Rc::clone(&ctx);
+    app.on_scroll_cb(move |delta_y| {
+        let mut ctx = ctx_wheel.borrow_mut();
+        let max = ctx.event_loop.manager_ref().max_scrollback();
+        if max == 0 {
+            return;
+        }
+        // 像素 → 行：累积小数部分避免丢失
+        let pixels_per_row = CELL_H as f32;
+        let delta_rows = delta_y / pixels_per_row;
+        ctx.scroll_offset = if delta_y > 0.0 {
+            (ctx.scroll_offset as f32 + delta_rows).round() as usize
+        } else {
+            ctx.scroll_offset
+                .saturating_sub((-delta_rows).round() as usize)
+        }
+        .min(max);
+    });
 
     // ---- 9. 窗口关闭请求 ----
     let ctx_close = Rc::clone(&ctx);
