@@ -487,7 +487,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // ---- 12. 运行 ----
-    let _ = (timer, resize_timer); // 持有定时器存活
+    // 注意：必须用真实绑定持有 Timer，不能用 `let _ = ...`！
+    // `_` 是通配模式不绑定值，元组会在 let 语句结束时立即 drop，
+    // 导致两个定时器被销毁、回调永不触发——表现为窗口黑屏 + 状态栏卡在 "--"。
+    let _timer_holders = (timer, resize_timer);
     app.run()?;
     Ok(())
 }
