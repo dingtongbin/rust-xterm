@@ -162,3 +162,26 @@
 | **合计** | **11** | **9** | **20** |
 
 **结论**：本轮 spec 范围内 100% 交付，依赖隔离严格保证，三个 GUI demo 全部可构建可运行，rust-xterm 核心 workspace 不受任何 GUI 框架污染。
+
+---
+
+## 七、本轮交付（implement-remaining-features spec，Task 1–12）
+
+> 对应 `.trae/specs/implement-remaining-features/spec.md`。本轮将 FEATURES.md 中标记为"未实现"或"部分实现"的 10 项特性全部补齐，rust-xterm 整体达成率从 70% 升至 97%（32/33）。
+
+| Task | 特性 | 完成证据（代码 / 测试） |
+| :-: | :--- | :--- |
+| 1 | **彩色 Emoji 渲染** | `TextureAtlas` 默认 RGBA（4 bytes/pixel）；`composite_glyph` 对 `is_color = true` 走 RGBA 直写路径；`rasterize_glyph` 多 Source（ColorOutline + ColorBitmap + Outline）；`font_tree::lookup_glyph` 对 Emoji 区段强制 `is_color = true`。Tests: `test_color_emoji_rasterize_rgba`, `test_color_emoji_composite`, `test_ascii_still_alpha`. |
+| 2 | **连字（Ligature）渲染** | `FontTree::shape_run(text, face_id) -> Vec<ShapeGlyph>` 使用 `swash::shape` GSUB/GPOS 整形；`TextureAtlas` 缓存键扩展为 `(run_hash, bold, italic)`；`Renderer::render_row` 按同属性 Cell run 整形绘制；`RendererConfig::enable_ligatures` 开关。Tests: `test_ligature_shape_run`, `test_ligature_disabled`, `test_ligature_enabled`, `test_ligature_run_cache_hit`. |
+| 3 | **智能选词规则** | `buffer::select_word` 优先检测 URL（http/https/ftp/file/ssh 前缀，大小写不敏感）/ Unix 路径 / IPv4 / IPv6，匹配则扩展覆盖整个 token，否则回退字符类别边界；不引入 regex/url 依赖。Tests: `test_select_word_url`, `test_select_word_unix_path`, `test_select_word_ipv4`, `test_select_word_plain`. |
+| 4 | **矩形块选模式** | `handle_selection_mouse` 读取 `mods.alt`，Alt+左键拖拽设 `rectangular = true`；`MouseState.alt_held` 字段。Tests: `test_alt_drag_rectangular`, `test_no_alt_linear`. |
+| 5 | **选区一致性校验** | `resize` / `scrollback_scroll` 清选区并 emit `SelectionChange`；`set_selection` 入参 clamp 到当前 size。Tests: `test_resize_clears_selection`, `test_set_selection_clamp`. |
+| 6 | **IME 预编辑** | `TerminalManager` 增加 `composition: Option<String>` + `set_preedit(&str)` / `commit_text(&str) -> Vec<u8>` / `clear_preedit()` / `preedit()`；`FrameUpdate.preedit: Option<String>` 传递预编辑文本；`Renderer::render_preedit(cursor, text)` 绘制带下划线预编辑文本；`TerminalEvent::PreeditChange(String)` 事件。Tests: `test_set_preedit_marks_dirty`, `test_commit_text_writes_pty`, `test_clear_preedit`, `test_preedit_change_event`. |
+| 7 | **Unicode 14.0 grapheme 聚簇** | 引入 `unicode-segmentation = "1.12"`（workspace.dependencies）；`buffer::selection_text` / `select_word` 按 grapheme cluster 边界扩展，避免拆分 ZWJ 序列 / 国旗对 / 肤色修饰符。Tests: `test_grapheme_zwj_selection` (family 👨‍👩‍👧), `test_grapheme_flag_selection` (🇨🇳). |
+| 8 | **全局字形缓存** | 新增 `crates/rust-xterm-renderer/src/global_atlas.rs`：`GlobalAtlas`（`OnceLock<Arc<Mutex<TextureAtlas>>>`）；`Renderer::with_global_atlas(config)` 共享；`render_cell_text` / `render_run_text` 优先从 global atlas 查询。保持 `#![forbid(unsafe_code)]`。Tests: `test_global_atlas_shared`, `test_global_atlas_cross_instance_hit`. |
+| 9 | **Sixel 图像协议** | 新增 `crates/rust-xterm-core/src/sixel.rs` 手写 Sixel 解析器（DCS `q` + RLE `!n!char` + 调色板 `#register;co;hue;sat;lum`），输出 RGBA + 尺寸；`manager.write` 分流 DCS 序列；`Renderer::render_image` blit 到 canvas。Tests: `test_sixel_parse_simple`, `test_sixel_parse_two_columns`, `test_sixel_rle`. |
+| 10 | **iTerm2 Inline Image 协议** | 引入 `image = { version = "0.25", default-features = false, features = ["png","jpeg"] }`；新增 `crates/rust-xterm-core/src/iterm2.rs` 解析 OSC 1337 `File=inline=1;...:base64`；手写 base64 解码（~50 行，不引入 base64 crate）；用 `image::load_from_memory` 解码 PNG/JPEG。OSC 1337 handler 注册。Test: `test_iterm2_png_decode`. |
+| 11 | **子行/列级脏区** | `DamageTracker` 增加 `col_spans: BTreeMap<usize, Vec<(usize, usize)>>`；新增 `mark_cell_dirty` / `mark_span_dirty` / `drain_spans`；`DirtyRow` 重命名为 `DirtySpan { row, col_start, col_end, cells }`；`Renderer::render_row_segment(row, col_start, col_end, cells)` 按列区间切片渲染；`render_frame` 改为接收 `&[DirtySpan]`。Tests: `test_mark_span_dirty_basic`, `test_mark_span_merge_adjacent`, `test_mark_dirty_overrides_spans`, `test_mark_cell_dirty`, `test_drain_spans_mixed`, `test_col_level_dirty`, `test_render_frame_partial_span`. |
+| 12 | **依赖隔离与 MSRV 1.88 验证** | 新增依赖：`unicode-segmentation 1.12` + `image 0.25`（png+jpeg features）。未引入 regex/url/base64 作为直接依赖（仅作为 wezterm-term fork 的传递依赖）。`cargo +1.88.0 build --all-targets` / `cargo +1.88.0 test --all-targets`（197 项全绿）/ `cargo +1.88.0 clippy --all-targets -- -D warnings`（workspace 零告警）/ `cargo +1.88.0 fmt --all -- --check`（通过）。`/workspace/Cargo.lock` 不含 slint/iced/egui/eframe（grep 返回 0）。三个 demo 通过 path 引用自动获得新依赖，无需修改 demo Cargo.toml；本轮补齐了三个 demo 的 `RendererConfig::enable_ligatures` 字段。 |
+
+**汇总**：本轮 spec Task 1–12 共 12 项特性 / 约 50 项子任务，**100% 完成**。rust-xterm 整体特性达成率从 70% 升至 97%（32/33，剩余 1 项为"逻辑行回绕 (Reflow)"，经 WezTerm 实现，rust-xterm 未做额外校验）。

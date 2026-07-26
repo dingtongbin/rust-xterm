@@ -183,6 +183,7 @@ impl App {
             canvas_height: canvas_h,
             default_fg: rust_xterm_core::Color::WHITE,
             default_bg: rust_xterm_core::Color::BLACK,
+            enable_ligatures: true,
         };
         let mut renderer = Renderer::new(renderer_cfg);
         renderer.clear();
@@ -390,8 +391,8 @@ impl App {
             return;
         }
 
-        for row in &frame.dirty_cells {
-            self.renderer.render_row(row.y as u32, &row.cells);
+        for span in &frame.dirty_spans {
+            self.renderer.render_row(span.row as u32, &span.cells);
         }
         // 渲染光标
         self.renderer.render_cursor(&frame.cursor);

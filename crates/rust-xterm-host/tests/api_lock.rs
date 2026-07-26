@@ -14,7 +14,7 @@
 use rust_xterm_core::{
     integration::RenderSurface, Addon, AddonContext, Buffer, BufferNamespace, BufferType,
     CellFlags, Codec, CodecGate, CodecStats, Color, CursorMeta, CursorShape, DamageTracker,
-    DirtyRect, DirtyRow, EventBus, EventSubscription, FrameUpdate, Marker, NullRenderSurface,
+    DirtyRect, DirtySpan, EventBus, EventSubscription, FrameUpdate, Marker, NullRenderSurface,
     NullWriter, Parser, RenderMetrics, RuntimeState, RustXtermCell, RustXtermConfig,
     RustXtermConfigBuilder, ScreenSnapshot, TerminalEvent, TerminalManager, TerminalSize,
     WezTermCore, WindowsTerminalTheme,
@@ -162,7 +162,7 @@ fn test_core_data_flow() {
     let frame = frame.unwrap();
 
     assert!(!frame.dirty_rects.is_empty());
-    assert!(!frame.dirty_cells.is_empty());
+    assert!(!frame.dirty_spans.is_empty());
 
     let snapshot = mgr.screen_snapshot();
     assert_eq!(snapshot.size.rows, 24);

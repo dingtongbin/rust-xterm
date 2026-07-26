@@ -18,5 +18,7 @@ rust-xterm-core = { path = "../rust-xterm-core" }
 swash = "0.1.15"
 fontdb = "0.16"
 lru = "0.12"
+# iTerm2 inline image 的 PNG/JPEG 解码
+image.workspace = true
 log.workspace = true
 anyhow.workspace = true

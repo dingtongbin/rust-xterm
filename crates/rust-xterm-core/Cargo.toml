@@ -30,6 +30,10 @@ wezterm_bidi = { package = "wezterm-bidi", version = "0.2.3" }
 encoding_rs.workspace = true
 log.workspace = true
 anyhow.workspace = true
+# grapheme cluster 边界（ZWJ 序列 / 国旗对 / 肤色修饰符）
+unicode-segmentation.workspace = true
+# iTerm2 inline image 的 PNG/JPEG 解码（纯 Rust 无 OS 依赖，符合 core 约束）
+image.workspace = true
 
 [dev-dependencies]
 # 测试时需要 sysinfo 进行内存监控

@@ -44,6 +44,8 @@ pub struct MouseState {
     pub last_click_time: Instant,
     /// 上次点击位置 `(row, col)`
     pub last_click_pos: (usize, usize),
+    /// 上次单击时 Alt 是否按下（用于拖拽决定矩形选区）
+    pub alt_held: bool,
 }
 
 impl Default for MouseState {
@@ -54,6 +56,7 @@ impl Default for MouseState {
             click_count: 0,
             last_click_time: Instant::now(),
             last_click_pos: (0, 0),
+            alt_held: false,
         }
     }
 }

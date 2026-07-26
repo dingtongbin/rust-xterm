@@ -3837,9 +3837,11 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
+ "image 0.25.10",
  "log",
  "tattoy-wezterm-surface",
  "tattoy-wezterm-term",
+ "unicode-segmentation",
  "wezterm-bidi",
 ]
 
@@ -3860,6 +3862,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "fontdb",
+ "image 0.25.10",
  "log",
  "lru",
  "rust-xterm-core",

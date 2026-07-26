@@ -156,6 +156,7 @@ impl TerminalApp {
             canvas_height: canvas_h,
             default_fg: Color::WHITE,
             default_bg: Color::BLACK,
+            enable_ligatures: true,
         };
         let mut renderer = Renderer::new(renderer_cfg);
         renderer.clear();
@@ -474,9 +475,9 @@ impl eframe::App for TerminalApp {
                         self.need_full_redraw = true;
                     }
                     // 渲染脏行
-                    for dirty in &frame.dirty_cells {
-                        let y = dirty.y as u32;
-                        self.renderer.render_row(y, &dirty.cells);
+                    for span in &frame.dirty_spans {
+                        let y = span.row as u32;
+                        self.renderer.render_row(y, &span.cells);
                     }
                     // 清除旧光标位置的 ghost：重绘旧光标所在行
                     if let Some(last) = self.last_cursor {

@@ -77,6 +77,15 @@ pub mod selection;
 /// GUI 集成抽象
 pub mod integration;
 
+/// 图像数据模型（Sixel / iTerm2 inline image 共用）
+pub mod image;
+
+/// Sixel 图像协议解析器
+pub mod sixel;
+
+/// iTerm2 Inline Image 协议解析器（OSC 1337）
+pub mod iterm2;
+
 // ============================================================================
 // 公共重导出
 // ============================================================================
@@ -88,13 +97,16 @@ pub use codec_gate::{Codec, CodecGate, CodecStats};
 pub use config::{RustXtermConfig, RustXtermConfigBuilder};
 pub use damage::{DamageTracker, DirtyRect};
 pub use events::{EventBus, EventSubscription, TerminalEvent};
+pub use image::{ImagePlacement, ImageStore};
 pub use input::{KeyInput, KeyMapping};
 pub use integration::{InputSource, NullRenderSurface, RenderMetrics, RenderSurface, SizeSource};
-pub use manager::{DirtyRow, FrameUpdate, TerminalManager};
+pub use iterm2::{parse_iterm2_image, parse_iterm2_osc_payload};
+pub use manager::{DirtySpan, FrameUpdate, TerminalManager};
 pub use mouse::{KeyMods, MouseAction, MouseButton, MouseState};
 pub use null_writer::{CapturingWriter, NullWriter, OutputBuffer};
 pub use parser::Parser;
 pub use selection::SelectionRange;
+pub use sixel::parse_sixel;
 pub use state::RuntimeState;
 pub use theme::WindowsTerminalTheme;
 pub use wezterm_core::{ScreenSnapshot, WezTermCore};
