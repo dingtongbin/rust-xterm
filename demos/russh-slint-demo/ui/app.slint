@@ -1,18 +1,17 @@
 // =============================================================================
-// app.slint: rust-xterm Slint Demo 的 UI 定义
+// app.slint: russh-slint-demo 的 UI 定义
 // =============================================================================
 // 布局：
 //   Window
 //     └─ VerticalLayout
-//          ├─ Rectangle (终端显示区，含 Image + TouchArea)
-//          └─ Rectangle (底部状态栏：FPS / 内存 / 滚动信息)
-//
-// 键盘：Window.forward-focus → FocusScope，key-pressed 回调上报到 Rust
-// 鼠标：TouchArea.pointer-event 回调上报 (x, y, kind, button) 到 Rust
+//          ├─ 终端显示区（Rectangle + Image + TouchArea）
+//          └─ 底部状态栏（SSH / FPS / 内存 / 滚动）
+//     └─ 遮罩层（条件渲染：connecting=true 时全屏覆盖）
+//     └─ FocusScope（键盘事件）
 // =============================================================================
 
 export component App inherits Window {
-    title: "rust-xterm Slint Demo";
+    title: "rust-xterm russh SSH Demo";
     preferred-width: 800px;
     preferred-height: 600px;
     background: #000000;
@@ -22,22 +21,27 @@ export component App inherits Window {
     in-out property <string> fps-text: "FPS: --";
     in-out property <string> mem-text: "Mem: -- MB";
     in-out property <string> scroll-text: "Scroll: 0";
+    in-out property <string> ssh-text: "SSH: idle";
+
+    // 连接状态机
+    //   connecting=true  → 显示遮罩，遮罩文字 = status-text
+    //   connecting=false → 隐藏遮罩，显示终端
+    in-out property <bool> connecting: true;
+    in-out property <string> status-text: "初始化中...";
+    // 错误状态：连接失败时设为非空字符串，遮罩显示红色错误信息
+    in-out property <string> error-text: "";
 
     // ---- Rust ↔ Slint 回调 ----
-    // 键盘：text + 三个修饰键布尔值
     callback key-pressed-cb(string, bool, bool, bool);
-    // 鼠标：x, y, kind(0=down/1=up/2=move/3=exit), button(0=none/1=left/2=right/3=middle)
     callback pointer-event-cb(float, float, int, int);
-    // 滚轮：delta-y（正值向上滚，负值向下滚，单位 px）
     callback scroll-cb(float);
 
-    // 将窗口焦点转发到 FocusScope
     forward-focus: key-handler;
 
     VerticalLayout {
         spacing: 0px;
 
-        // ---- 终端显示区 ----
+        // ---- 终端显示区（始终存在，但被遮罩覆盖时不可见） ----
         Rectangle {
             vertical-stretch: 1;
             background: #000000;
@@ -48,8 +52,6 @@ export component App inherits Window {
                 width: 100%;
                 height: 100%;
                 source: terminal-image;
-                // contain 而非 fill：避免非等比窗口下终端被拉伸变形
-                // （canvas 物理像素尺寸由 resize timer 保证与显示矩形 1:1）
                 image-fit: contain;
             }
 
@@ -80,8 +82,14 @@ export component App inherits Window {
 
             HorizontalLayout {
                 padding: 4px;
-                spacing: 16px;
+                spacing: 12px;
 
+                Text {
+                    text: ssh-text;
+                    color: #88aaff;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
                 Text {
                     text: fps-text;
                     color: #00ff00;
@@ -100,6 +108,43 @@ export component App inherits Window {
                     font-size: 11px;
                     vertical-alignment: center;
                 }
+            }
+        }
+    }
+
+    // ---- 连接遮罩（条件渲染：覆盖整个窗口，包括状态栏） ----
+    // 当 connecting=true 时显示：半透明黑色背景 + 居中进度文字 + 错误信息
+    if connecting : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 220);
+
+        VerticalLayout {
+            alignment: center;
+
+            Text {
+                text: "rust-xterm russh SSH";
+                color: #ffffff;
+                font-size: 22px;
+                font-weight: 800;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: status-text;
+                color: #88aaff;
+                font-size: 14px;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: error-text;
+                color: #ff5555;
+                font-size: 12px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
             }
         }
     }
