@@ -21,7 +21,7 @@
 //! ```
 
 use crate::pty::PtyBridge;
-use rust_xterm_core::{FrameUpdate, TerminalManager, TerminalSize};
+use rust_xterm_core::{FrameUpdate, KeyInput, KeyMapping, KeyMods, TerminalManager, TerminalSize};
 use std::time::{Duration, Instant};
 
 /// 事件循环配置
@@ -140,6 +140,19 @@ impl EventLoop {
         } else {
             Ok(())
         }
+    }
+
+    /// 将逻辑按键编码后发送给 PTY
+    ///
+    /// 内部调用 [`KeyMapping::encode_key`] 将按键编码为终端字节序列，
+    /// 再通过 [`Self::send_input`] 发送。
+    ///
+    /// 注意：此处 `app_cursor` 固定为 `false`（普通光标模式）。
+    /// 若宿主需要支持应用光标模式（DECSET 1），可直接调用
+    /// [`KeyMapping::encode_key`] 并通过 [`Self::send_input`] 发送。
+    pub fn send_key(&mut self, key: KeyInput, mods: KeyMods) -> std::io::Result<()> {
+        let data = KeyMapping::encode_key(key, mods, false);
+        self.send_input(&data)
     }
 
     /// 调整终端大小

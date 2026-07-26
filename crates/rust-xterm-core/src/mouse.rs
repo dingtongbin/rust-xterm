@@ -12,6 +12,8 @@
 //! 4. 宿主在每次 tick 后调用 [`crate::TerminalManager::drain_output`] 取出报告字节
 //!    并转发给 PTY，从而完成鼠标 → 子进程的闭环
 
+use std::time::Instant;
+
 /// 修饰键状态
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KeyMods {
@@ -21,6 +23,39 @@ pub struct KeyMods {
     pub alt: bool,
     /// Ctrl 键
     pub ctrl: bool,
+}
+
+/// 鼠标选区状态机
+///
+/// 在非鼠标跟踪模式下，由 [`crate::TerminalManager`] 持有以实现
+/// 单击拖拽选区、双击选词、三击选行的交互。
+///
+/// 点击计数遵循 500ms 时间窗与同位置约束，循环 `1 → 2 → 3 → 1`。
+/// 坐标统一为 `(row, col)` 0-based，与 [`crate::SelectionRange`] 一致。
+#[derive(Debug, Clone)]
+pub struct MouseState {
+    /// 是否处于选区拖拽中
+    pub selecting: bool,
+    /// 当前拖拽起点 `(row, col)`
+    pub select_start: (usize, usize),
+    /// 当前点击计数（1/2/3）
+    pub click_count: u32,
+    /// 上次点击时间
+    pub last_click_time: Instant,
+    /// 上次点击位置 `(row, col)`
+    pub last_click_pos: (usize, usize),
+}
+
+impl Default for MouseState {
+    fn default() -> Self {
+        Self {
+            selecting: false,
+            select_start: (0, 0),
+            click_count: 0,
+            last_click_time: Instant::now(),
+            last_click_pos: (0, 0),
+        }
+    }
 }
 
 /// 鼠标按键

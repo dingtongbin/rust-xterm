@@ -75,11 +75,28 @@ rust-xterm mirrors the familiar xterm.js surface so frontend engineers feel at h
 - **Scrollback**: configurable, bounded ring buffer (no unbounded growth).
 - **Mouse**: SGR mouse mode, button/ motion tracking.
 - **Hyperlinks**: OSC 8 hyperlink support.
+- **CWD report**: OSC 7 `file://` URL parsing emits `CwdChange(PathBuf)` event.
+- **Focus report**: DECSET 1004 — `set_focused` generates `\x1b[I` / `\x1b[O` to `drain_output`.
+- **Scroll region**: DECSTBM queryable via `scroll_region() -> Option<(usize, usize)>`.
+- **Keyboard mapping**: `KeyInput` enum + `KeyMapping::encode_key` (SS3/CSI dual mode, Ctrl/Alt, F1–F12).
+- **Selection**: linear + rectangular `SelectionRange`, mouse-driven (single/double/triple click, drag), `selection_text()` extraction, `SelectionReady` auto-copy event.
 - **Synchronized output**: DECSET 2026 batched repaint.
 - **Bracketed paste**: DECSET 2004.
 - **Alternate screen**: DECSET 1049.
 - **CJK**: wide-character width detection, proper double-cell rendering.
 - **Emoji**: color-glyph fast path via `swash` ColorOutline / ColorBitmap.
+
+## GUI demos
+
+Three independent demo packages under `demos/` — each is its own Cargo workspace root with its own `Cargo.lock`, so GUI framework dependencies never leak into the core workspace:
+
+| Demo | Framework | Features |
+|------|-----------|----------|
+| `demos/slint-demo` | Slint 1.6 | Image widget, Timer-driven tick, keyboard/mouse/resize, FPS+mem status bar |
+| `demos/iced-demo` | iced 0.13 | Subscription-based tick, wheel scrollback, full keyboard mapping |
+| `demos/egui-demo` | eframe 0.29 | TextureHandle upload, request_repaint, wheel scrollback |
+
+Verify isolation: `grep -E 'name = "(slint\|iced\|egui\|eframe)"' /workspace/Cargo.lock` returns nothing.
 
 ## Integration
 

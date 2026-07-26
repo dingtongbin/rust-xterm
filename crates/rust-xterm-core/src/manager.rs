@@ -27,16 +27,19 @@
 //! ```
 
 use crate::addon::{Addon, AddonContext};
-use crate::buffer::{Buffer, BufferNamespace, BufferType, Marker};
+use crate::buffer::{self, Buffer, BufferNamespace, BufferType, Marker};
 use crate::codec_gate::{Codec, CodecGate};
 use crate::damage::{DamageTracker, DirtyRect};
 use crate::events::{EventBus, EventSubscription, TerminalEvent};
+use crate::mouse::{KeyMods, MouseAction, MouseButton, MouseState};
 use crate::parser::Parser;
+use crate::selection::SelectionRange;
 use crate::state::RuntimeState;
 use crate::theme::WindowsTerminalTheme;
 use crate::wezterm_core::{ScreenSnapshot, WezTermCore};
 use crate::{Color, CursorMeta, TerminalSize};
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// 帧更新数据
 ///
@@ -95,6 +98,10 @@ pub struct TerminalManager {
     parser: Parser,
     /// 10. BEL 挂起标志（在 write 中扫描 BEL 字节设置，emit_state_events 中消费）
     bell_pending: bool,
+    /// 11. 当前选区（线性或矩形），`None` 表示无选区
+    selection: Option<SelectionRange>,
+    /// 12. 鼠标选区状态机（点击计数、拖拽起点等）
+    mouse_state: MouseState,
 }
 
 impl TerminalManager {
@@ -115,6 +122,15 @@ impl TerminalManager {
             events_for_osc52.emit(&TerminalEvent::ClipboardRequest(payload));
         });
 
+        // 注册内部 OSC 7 handler，解析 `file://<host>/<path>` 并 emit CwdChange 事件。
+        // 注意：用户通过 `parser()` 注册自己的 OSC 7 handler 会覆盖此内部 handler。
+        let events_for_osc7 = events.clone();
+        parser.register_osc(7, move |data: &[u8]| {
+            if let Some(path) = parse_cwd_osc7(data) {
+                events_for_osc7.emit(&TerminalEvent::CwdChange(path));
+            }
+        });
+
         Self {
             core: WezTermCore::new(size, Default::default()),
             codec: CodecGate::new(codec),
@@ -130,6 +146,8 @@ impl TerminalManager {
             last_icon_name: String::new(),
             parser,
             bell_pending: false,
+            selection: None,
+            mouse_state: MouseState::default(),
         }
     }
 
@@ -452,17 +470,132 @@ impl TerminalManager {
     /// 提交一个鼠标事件
     ///
     /// 坐标 `x`/`y` 为当前可视窗口的 0-based 列/行。
-    /// 若应用启用了鼠标跟踪，WezTerm 会自动编码报告并写入捕获缓冲，
-    /// 下次 [`Self::drain_output`] 即可取出转发给 PTY。
+    ///
+    /// - 若应用启用了鼠标跟踪模式（`is_mouse_grabbed` 为真），事件转发给 WezTerm，
+    ///   自动编码报告并写入捕获缓冲，下次 [`Self::drain_output`] 即可取出转发给 PTY。
+    /// - 否则，事件用于本地选区交互：左键单击/拖拽选词、双击选词、三击选行。
     pub fn mouse_event(
         &mut self,
         x: usize,
         y: usize,
-        action: crate::mouse::MouseAction,
-        button: crate::mouse::MouseButton,
-        mods: crate::mouse::KeyMods,
+        action: MouseAction,
+        button: MouseButton,
+        mods: KeyMods,
     ) {
-        self.core.mouse_event(x, y, action, button, mods);
+        if self.core.is_mouse_grabbed() {
+            self.core.mouse_event(x, y, action, button, mods);
+            return;
+        }
+        self.handle_selection_mouse(x, y, action, button, mods);
+    }
+
+    /// 处理非鼠标跟踪模式下的选区交互
+    ///
+    /// 实现单击拖拽选区、双击选词、三击选行的状态机。
+    /// 点击计数遵循 500ms 时间窗与同位置约束，循环 1→2→3→1。
+    ///
+    /// 入参 `x`/`y` 为 0-based 列/行，内部统一转换为 `(row, col) = (y, x)`。
+    fn handle_selection_mouse(
+        &mut self,
+        x: usize,
+        y: usize,
+        action: MouseAction,
+        button: MouseButton,
+        _mods: KeyMods,
+    ) {
+        // 仅左键参与选区交互
+        if button != MouseButton::Left {
+            return;
+        }
+        // 统一使用 (row, col) 坐标
+        let pos = (y, x);
+        match action {
+            MouseAction::Press => {
+                let now = Instant::now();
+                // 点击计数：500ms 内且同位置则递增，否则重置为 1
+                let same_pos = self.mouse_state.last_click_pos == pos;
+                let within_window = now.duration_since(self.mouse_state.last_click_time)
+                    < Duration::from_millis(500);
+                if same_pos && within_window {
+                    self.mouse_state.click_count = (self.mouse_state.click_count % 3) + 1;
+                } else {
+                    self.mouse_state.click_count = 1;
+                }
+                self.mouse_state.last_click_time = now;
+                self.mouse_state.last_click_pos = pos;
+
+                match self.mouse_state.click_count {
+                    1 => {
+                        // 单击：清旧选区，记录拖拽起点
+                        self.selection = None;
+                        self.mouse_state.selecting = true;
+                        self.mouse_state.select_start = pos;
+                        self.events.emit(&TerminalEvent::SelectionChange);
+                    }
+                    2 => {
+                        // 双击：选词
+                        self.mouse_state.selecting = true;
+                        let snapshot = self.screen_snapshot();
+                        let range = buffer::select_word(pos, &snapshot.rows);
+                        self.selection = Some(range);
+                        self.events.emit(&TerminalEvent::SelectionChange);
+                    }
+                    3 => {
+                        // 三击：选行
+                        self.mouse_state.selecting = true;
+                        let snapshot = self.screen_snapshot();
+                        let range = buffer::select_line(pos, &snapshot.rows);
+                        self.selection = Some(range);
+                        self.events.emit(&TerminalEvent::SelectionChange);
+                    }
+                    _ => {}
+                }
+            }
+            MouseAction::Move => {
+                // 拖拽扩展选区（仅单击后的拖拽）
+                if self.mouse_state.selecting && self.mouse_state.click_count == 1 {
+                    let start = self.mouse_state.select_start;
+                    self.selection = Some(SelectionRange {
+                        start,
+                        end: pos,
+                        rectangular: false,
+                    });
+                    self.events.emit(&TerminalEvent::SelectionChange);
+                }
+            }
+            MouseAction::Release => {
+                if self.mouse_state.selecting {
+                    self.mouse_state.selecting = false;
+                    if self.selection.is_some() {
+                        self.events.emit(&TerminalEvent::SelectionReady);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 设置当前选区（程序化 API）
+    ///
+    /// 传入 `None` 清除选区。会派发 [`TerminalEvent::SelectionChange`] 事件。
+    pub fn set_selection(&mut self, range: Option<SelectionRange>) {
+        self.selection = range;
+        self.events.emit(&TerminalEvent::SelectionChange);
+    }
+
+    /// 获取当前选区
+    pub fn selection(&self) -> Option<SelectionRange> {
+        self.selection
+    }
+
+    /// 获取当前选区的文本内容
+    ///
+    /// 从当前屏幕快照按选区范围提取文本。无选区时返回 `None`。
+    /// 线性选区按起点终点排序后跨行用 `\n` 连接；矩形选区按列范围逐行截取。
+    pub fn selection_text(&self) -> Option<String> {
+        let range = self.selection?;
+        let snapshot = self.screen_snapshot();
+        Some(buffer::selection_text(range, &snapshot.rows))
     }
 
     /// 获取默认前景色
@@ -498,6 +631,38 @@ impl TerminalManager {
     /// 当应用发送 `\x1b[?2004h` 时启用，`\x1b[?2004l` 时禁用。
     pub fn is_bracketed_paste_enabled(&self) -> bool {
         self.core.is_bracketed_paste_enabled()
+    }
+
+    /// 是否启用了焦点报告模式（DECSET 1004）
+    ///
+    /// 当应用发送 `\x1b[?1004h` 时启用，`\x1b[?1004l` 时禁用。
+    /// 状态由 [`Self::write`] 在数据流中扫描 DECSET 1004 序列维护。
+    pub fn is_focus_reporting_enabled(&self) -> bool {
+        self.core.is_focus_reporting_enabled()
+    }
+
+    /// 通知终端焦点状态变化
+    ///
+    /// 若启用了焦点报告模式（DECSET 1004），WezTerm 会向输出缓冲写入
+    /// `\x1b[I`（`focused = true`）或 `\x1b[O`（`focused = false`），
+    /// 宿主在下次 [`Self::drain_output`] 即可取出转发给 PTY。
+    ///
+    /// 同时向事件总线派发 [`TerminalEvent::FocusReport`]（仅在焦点报告启用时），
+    /// 宿主可据此同步本地 UI 焦点状态。
+    pub fn set_focused(&mut self, focused: bool) {
+        let reporting = self.core.is_focus_reporting_enabled();
+        self.core.set_focused(focused);
+        if reporting {
+            self.events.emit(&TerminalEvent::FocusReport(focused));
+        }
+    }
+
+    /// 获取当前滚动区域（DECSTBM），1-based `(top, bottom)`
+    ///
+    /// 返回 `None` 表示全屏（未设置 DECSTBM 或已重置）。
+    /// 状态由 [`Self::write`] 在数据流中扫描 `\x1b[<top>;<bottom>r` 序列维护。
+    pub fn scroll_region(&self) -> Option<(usize, usize)> {
+        self.core.scroll_region()
     }
 
     /// 获取对 WezTermCore 的不可变引用（高级 API）
@@ -628,6 +793,27 @@ impl TerminalManager {
             (bg.3 * 255.0) as u8,
         );
     }
+}
+
+/// 解析 OSC 7 payload 为本地路径
+///
+/// payload 形如 `file://<host>/<path>`，手写解析以避免引入 `url` crate：
+/// 1. 校验 `file://` 前缀
+/// 2. 跳过 host（从 `file://` 后到第一个 `/`）
+/// 3. 剩余部分（含前导 `/`）作为路径
+///
+/// 返回 `None` 表示格式不合法或无路径。
+fn parse_cwd_osc7(payload: &[u8]) -> Option<PathBuf> {
+    let s = std::str::from_utf8(payload).ok()?;
+    const PREFIX: &str = "file://";
+    let rest = s.strip_prefix(PREFIX)?;
+    // host 段到第一个 '/' 结束；其后为绝对路径
+    let path_start = rest.find('/')?;
+    let path = &rest[path_start..];
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -841,5 +1027,297 @@ mod tests {
             assert_eq!(cell.hyperlink.as_ref().unwrap(), "https://example.com");
         }
         // 至少不应 panic
+    }
+
+    // ========================================================================
+    // Task 1: 焦点报告（DECSET 1004）
+    // ========================================================================
+
+    /// Task 1: 启用焦点报告后 set_focused 应将 \x1b[I 推入 drain_output
+    #[test]
+    fn test_focus_report_enabled() {
+        use std::thread;
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // 初始未启用
+        assert!(!mgr.is_focus_reporting_enabled());
+        // 启用焦点报告：ESC [ ? 1004 h
+        mgr.write(b"\x1b[?1004h");
+        assert!(mgr.is_focus_reporting_enabled(), "DECSET 1004 后应启用");
+        // WezTerm 默认 focused=true，先切换到 false 以触发后续状态变更。
+        // WezTerm 的 writer 是 ThreadedWriter（后台线程异步写入），
+        // 需短暂 sleep 让后台线程处理完写入后再 drain。
+        mgr.set_focused(false);
+        thread::sleep(Duration::from_millis(20));
+        let _ = mgr.drain_output();
+        // 获得焦点：从 false 变 true，应产生 \x1b[I
+        mgr.set_focused(true);
+        thread::sleep(Duration::from_millis(20));
+        let out = mgr.drain_output();
+        assert!(
+            out.windows(3).any(|w| w == b"\x1b[I"),
+            "启用时 set_focused(true) 应产生 \\x1b[I，got {out:?}"
+        );
+        // 失去焦点：从 true 变 false，应产生 \x1b[O
+        mgr.set_focused(false);
+        thread::sleep(Duration::from_millis(20));
+        let out = mgr.drain_output();
+        assert!(
+            out.windows(3).any(|w| w == b"\x1b[O"),
+            "启用时 set_focused(false) 应产生 \\x1b[O，got {out:?}"
+        );
+        // 禁用焦点报告：ESC [ ? 1004 l
+        mgr.write(b"\x1b[?1004l");
+        assert!(!mgr.is_focus_reporting_enabled(), "DECRST 1004 后应禁用");
+    }
+
+    /// Task 1: 未启用焦点报告时 set_focused 不应产生输出
+    #[test]
+    fn test_focus_report_disabled() {
+        use std::thread;
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        assert!(!mgr.is_focus_reporting_enabled());
+        mgr.set_focused(false);
+        mgr.set_focused(true);
+        // 即使等待后台线程，未启用焦点报告也不应产生输出
+        thread::sleep(Duration::from_millis(20));
+        let out = mgr.drain_output();
+        assert!(out.is_empty(), "未启用焦点报告时不应产生输出，got {out:?}");
+    }
+
+    // ========================================================================
+    // Task 2: OSC 7 CWD 事件
+    // ========================================================================
+
+    /// Task 2: OSC 7 file:// URL 应触发 CwdChange 事件
+    #[test]
+    fn test_osc7_cwd_event() {
+        use std::sync::{Arc, Mutex};
+
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        let received: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let r = received.clone();
+        let _sub = mgr.on(move |event| {
+            if let TerminalEvent::CwdChange(path) = event {
+                *r.lock().unwrap() = Some(path.clone());
+            }
+        });
+        // ESC ] 7 ; file://localhost/home/user BEL
+        mgr.write(b"\x1b]7;file://localhost/home/user\x07");
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.as_deref(), Some(std::path::Path::new("/home/user")));
+    }
+
+    /// Task 2: 格式错误的 OSC 7 payload 应被忽略，不触发事件
+    #[test]
+    fn test_osc7_malformed_ignored() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let _sub = mgr.on(move |event| {
+            if matches!(event, TerminalEvent::CwdChange(_)) {
+                c.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        // 非 file:// 前缀
+        mgr.write(b"\x1b]7;https://example.com\x07");
+        // 无路径
+        mgr.write(b"\x1b]7;file://localhost\x07");
+        // 非 UTF-8 风格的乱码（file:// 但无 / 路径）
+        mgr.write(b"\x1b]7;file://localhost\x07");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "格式错误的 OSC 7 不应触发 CwdChange"
+        );
+    }
+
+    // ========================================================================
+    // Task 3: 滚动区域查询
+    // ========================================================================
+
+    /// Task 3: DECSTBM 设置滚动区域后应能查询
+    #[test]
+    fn test_scroll_region_query() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // 初始为全屏
+        assert!(mgr.scroll_region().is_none(), "初始应为全屏 (None)");
+        // 设置滚动区域 5..10 (1-based)：ESC [ 5 ; 10 r
+        mgr.write(b"\x1b[5;10r");
+        assert_eq!(
+            mgr.scroll_region(),
+            Some((5, 10)),
+            "DECSTBM 后应返回 (5, 10)"
+        );
+        // 重置为全屏：ESC [ r
+        mgr.write(b"\x1b[r");
+        assert!(mgr.scroll_region().is_none(), "重置后应为全屏 (None)");
+        // 等价于全屏的设置也应返回 None
+        mgr.write(b"\x1b[1;24r");
+        assert!(mgr.scroll_region().is_none(), "1;24 等价于全屏，应为 None");
+    }
+
+    // ========================================================================
+    // Task 5: 选区文本提取
+    // ========================================================================
+
+    /// Task 5: 线性选区跨行文本提取
+    #[test]
+    fn test_selection_linear_text() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        // 使用 \r\n 确保 "world" 出现在第 1 行 col 0..4（\n 仅换行不回车）
+        mgr.write(b"hello\r\nworld");
+        let _ = mgr.poll_frame(Instant::now());
+        let snap = mgr.screen_snapshot();
+        // 第 0 行 "hello"，第 1 行 "world"
+        let range = SelectionRange::linear((0, 1), (1, 3));
+        let text = buffer::selection_text(range, &snap.rows);
+        // 第 0 行 col 1..末尾 = "ello"，第 1 行 0..=3 = "worl"
+        assert_eq!(text, "ello\nworl");
+    }
+
+    /// Task 5: 矩形选区文本提取
+    #[test]
+    fn test_selection_rectangular_text() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        // 使用 \r\n 确保 "world" 出现在第 1 行 col 0..4（\n 仅换行不回车）
+        mgr.write(b"hello\r\nworld");
+        let _ = mgr.poll_frame(Instant::now());
+        let snap = mgr.screen_snapshot();
+        // 矩形：(0,1)..(1,3)
+        let range = SelectionRange::rectangular((0, 1), (1, 3));
+        let text = buffer::selection_text(range, &snap.rows);
+        // 第 0 行 col 1..=3 = "ell"，第 1 行 col 1..=3 = "orl"
+        assert_eq!(text, "ell\norl");
+    }
+
+    // ========================================================================
+    // Task 6: 鼠标选区交互
+    // ========================================================================
+
+    /// Task 6: 单击拖拽产生线性选区，释放触发 SelectionReady
+    #[test]
+    fn test_mouse_drag_selection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        mgr.write(b"hello world");
+        let _ = mgr.poll_frame(Instant::now());
+
+        let ready = Arc::new(AtomicUsize::new(0));
+        let r = ready.clone();
+        let _sub = mgr.on(move |event| {
+            if matches!(event, TerminalEvent::SelectionReady) {
+                r.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let mods = KeyMods::default();
+        // 按下左键于 (col=0, row=0)
+        mgr.mouse_event(0, 0, MouseAction::Press, MouseButton::Left, mods);
+        // 拖拽到 (col=4, row=0)
+        mgr.mouse_event(4, 0, MouseAction::Move, MouseButton::Left, mods);
+        assert_eq!(
+            mgr.selection(),
+            Some(SelectionRange::linear((0, 0), (0, 4)))
+        );
+        // 释放
+        mgr.mouse_event(4, 0, MouseAction::Release, MouseButton::Left, mods);
+        assert_eq!(
+            ready.load(Ordering::Relaxed),
+            1,
+            "释放应触发 SelectionReady"
+        );
+        // 选区文本应为 "hello"
+        assert_eq!(mgr.selection_text().as_deref(), Some("hello"));
+    }
+
+    /// Task 6: 双击智能选词
+    #[test]
+    fn test_double_click_select_word() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 20));
+        mgr.write(b"foo bar baz");
+        let _ = mgr.poll_frame(Instant::now());
+
+        let mods = KeyMods::default();
+        // 第一次单击于 'b'(col=4) of "bar"
+        mgr.mouse_event(4, 0, MouseAction::Press, MouseButton::Left, mods);
+        // 第二次单击（同位置，500ms 内）→ 双击
+        mgr.mouse_event(4, 0, MouseAction::Press, MouseButton::Left, mods);
+        // 选区应覆盖 "bar"（col 4..6）
+        let sel = mgr.selection().expect("双击应产生选区");
+        assert_eq!(sel.start, (0, 4));
+        assert_eq!(sel.end, (0, 6));
+        assert_eq!(mgr.selection_text().as_deref(), Some("bar"));
+    }
+
+    /// Task 6: 三击选整行
+    #[test]
+    fn test_triple_click_select_line() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 20));
+        mgr.write(b"hello world");
+        let _ = mgr.poll_frame(Instant::now());
+
+        let mods = KeyMods::default();
+        // 连续三次同位置单击 → 三击
+        mgr.mouse_event(2, 0, MouseAction::Press, MouseButton::Left, mods);
+        mgr.mouse_event(2, 0, MouseAction::Press, MouseButton::Left, mods);
+        mgr.mouse_event(2, 0, MouseAction::Press, MouseButton::Left, mods);
+        let sel = mgr.selection().expect("三击应产生选区");
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end, (0, 19), "三击应选整行 0..cols-1");
+        // 选区文本应包含 "hello world"
+        let text = mgr.selection_text().unwrap();
+        assert!(text.contains("hello world"));
+    }
+
+    // ========================================================================
+    // Task 7: 双宽度字符
+    // ========================================================================
+
+    /// Task 7: CJK 宽字符应占据 width=2
+    #[test]
+    fn test_wide_char_advance() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 20));
+        mgr.write("你".as_bytes());
+        let _ = mgr.poll_frame(Instant::now());
+        let snap = mgr.screen_snapshot();
+        let cell = &snap.rows[0][0];
+        assert_eq!(cell.text, "你");
+        assert_eq!(cell.width, 2, "CJK 字符 width 应为 2");
+        assert!(cell.is_wide(), "is_wide 应为 true");
+    }
+
+    /// Task 7: 写入宽字符后光标应前进 2 列
+    #[test]
+    fn test_wide_char_cursor_movement() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 20));
+        mgr.write("你".as_bytes());
+        let _ = mgr.poll_frame(Instant::now());
+        let cursor = mgr.cursor();
+        assert_eq!(cursor.x, 2, "写入宽字符后光标应前进 2 列");
+        // 再写一个宽字符，光标到 4
+        mgr.write("好".as_bytes());
+        let cursor = mgr.cursor();
+        assert_eq!(cursor.x, 4);
+    }
+
+    /// Task 7: 在宽字符位置覆盖写入应替换该宽字符
+    #[test]
+    fn test_wide_char_overwrite() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 20));
+        // 写入宽字符 "你"（占 col 0-1）
+        mgr.write("你".as_bytes());
+        let _ = mgr.poll_frame(Instant::now());
+        // 光标回到行首
+        mgr.write(b"\r");
+        // 写入 ASCII 'A'，应覆盖 col 0
+        mgr.write(b"A");
+        let _ = mgr.poll_frame(Instant::now());
+        let snap = mgr.screen_snapshot();
+        assert_eq!(snap.rows[0][0].text, "A", "覆盖后 col 0 应为 A");
     }
 }
