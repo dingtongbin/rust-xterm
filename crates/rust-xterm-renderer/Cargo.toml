@@ -11,12 +11,12 @@ path = "src/lib.rs"
 
 [dependencies]
 rust-xterm-core = { path = "../rust-xterm-core" }
-# swash / lru 用 caret（允许 0.1.x / 0.12.x patch 升级），而非 workspace 的 `=` 精确锁定。
-# 原因：独立 GUI demo（iced-demo 经 cosmic-text）需 swash ^0.1.17 / lru ^0.12.1，
-# 若此处用 `=0.1.15` 会与 iced 传递依赖冲突。
-# workspace 自身构建仍锁定 0.1.15 / 0.12.0（/workspace/Cargo.lock sticky），不受影响。
+# swash / lru / fontdb 用 caret（允许 patch 升级），而非 workspace 的 `=` 精确锁定。
+# 原因：独立 GUI demo 需传递依赖的新 patch 版本（如 iced 需 swash ^0.1.17，
+# slint 1.6 需 fontdb ^0.16.1）。若用 `=` 会与 demo 传递依赖冲突。
+# workspace 自身构建仍锁定 0.1.15 / 0.12.0 / 0.16.0（/workspace/Cargo.lock sticky），不受影响。
 swash = "0.1.15"
-fontdb.workspace = true
+fontdb = "0.16"
 lru = "0.12"
 log.workspace = true
 anyhow.workspace = true

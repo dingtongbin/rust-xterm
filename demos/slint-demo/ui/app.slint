@@ -45,19 +45,18 @@ export component App inherits Window {
                 y: 0px;
                 width: 100%;
                 height: 100%;
-                image: terminal-image;
+                source: terminal-image;
                 image-fit: fill;
             }
 
             touch := TouchArea {
                 width: 100%;
                 height: 100%;
-                mouse-cursor: ibeam;
 
                 pointer-event(e) => {
                     pointer-event-cb(
-                        e.position.x,
-                        e.position.y,
+                        self.mouse-x / 1px,
+                        self.mouse-y / 1px,
                         kind-to-int(e.kind),
                         button-to-int(e.button)
                     );

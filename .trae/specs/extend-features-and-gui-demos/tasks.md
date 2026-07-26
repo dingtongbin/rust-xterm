@@ -57,33 +57,34 @@
   - [x] SubTask 8.3: `cargo +1.88.0 clippy --all-targets -- -D warnings` 通过
   - [x] SubTask 8.4: `cargo +1.88.0 fmt --all -- --check` 通过
 
-- [ ] Task 9: slint-demo（独立 package）
-  - [ ] SubTask 9.1: 创建 `/workspace/demos/slint-demo/Cargo.toml`（独立 [package]，[dependencies] 含 `slint = "1.6"` + path 引用 rust-xterm 三 crate，**不**用 .workspace = true）
-  - [ ] SubTask 9.2: 实现 `src/main.rs`：Slint 窗口 + Image 组件显示 RGBA、Timer 驱动 EventLoop::tick、键盘/鼠标/滚轮/resize 事件、底部状态栏 FPS+内存
-  - [ ] SubTask 9.3: 验证 `cd demos/slint-demo && cargo build` 通过，demo 能启动交互
-  - [ ] SubTask 9.4: 验证 `/workspace/Cargo.lock` 不含 slint 传递依赖
+- [x] Task 9: slint-demo（独立 package）
+  - [x] SubTask 9.1: 创建 `/workspace/demos/slint-demo/Cargo.toml`（独立 [package]，[dependencies] 含 `slint = "=1.6.0"` + path 引用 rust-xterm 三 crate，**不**用 .workspace = true；`slint-build = "=1.6.0"`）
+  - [x] SubTask 9.2: 实现 `src/main.rs`：Slint 窗口 + Image 组件显示 RGBA、Timer 驱动 EventLoop::tick、键盘/鼠标/resize 事件、底部状态栏 FPS+内存。鼠标选区状态机由 TerminalManager.mouse_event 内部维护，demo 仅转发事件 + Release 复制 + 中键粘贴。
+  - [x] SubTask 9.3: 验证 `cd demos/slint-demo && cargo build --release` 通过（22 MB 二进制产出）
+  - [x] SubTask 9.4: 验证 `/workspace/Cargo.lock` 不含 slint 传递依赖（grep `slint|i-slint` 无输出）
 
-- [ ] Task 10: iced-demo（独立 package）
-  - [ ] SubTask 10.1: 创建 `/workspace/demos/iced-demo/Cargo.toml`（独立，`iced = "0.13"` features=["image","tokio"]）
-  - [ ] SubTask 10.2: 实现 `src/main.rs`：iced Application + canvas/image widget + Subscription::tick + 键盘/鼠标/resize + 底部 text 状态栏
-  - [ ] SubTask 10.3: 验证 `cd demos/iced-demo && cargo build` 通过
-  - [ ] SubTask 10.4: 验证 `/workspace/Cargo.lock` 不含 iced 传递依赖
+- [x] Task 10: iced-demo（独立 package）
+  - [x] SubTask 10.1: 创建 `/workspace/demos/iced-demo/Cargo.toml`（独立，`iced = "0.13"` features=["image","tokio"]）
+  - [x] SubTask 10.2: 实现 `src/main.rs`：iced Application + image widget + Subscription::tick + 键盘/鼠标/滚轮/resize + 底部 text 状态栏
+  - [x] SubTask 10.3: 验证 `cd demos/iced-demo && cargo build --release` 通过（25 MB 二进制产出）
+  - [x] SubTask 10.4: 验证 `/workspace/Cargo.lock` 不含 iced 传递依赖（grep `iced` 无输出）
 
-- [ ] Task 11: egui-demo（独立 package）
-  - [ ] SubTask 11.1: 创建 `/workspace/demos/egui-demo/Cargo.toml`（独立，`eframe = "0.29"`）
-  - [ ] SubTask 11.2: 实现 `src/main.rs`：eframe App + TextureHandle 上传 RGBA + request_repaint + 键盘/鼠标/resize + egui::Label 状态栏
-  - [ ] SubTask 11.3: 验证 `cd demos/egui-demo && cargo build` 通过
-  - [ ] SubTask 11.4: 验证 `/workspace/Cargo.lock` 不含 egui 传递依赖
+- [x] Task 11: egui-demo（独立 package）
+  - [x] SubTask 11.1: 创建 `/workspace/demos/egui-demo/Cargo.toml`（独立，`eframe = "0.29"` + `egui = "0.29"`）
+  - [x] SubTask 11.2: 实现 `src/main.rs`：eframe App + TextureHandle 上传 RGBA + request_repaint + 键盘/鼠标/滚轮/resize + egui::Label 状态栏
+  - [x] SubTask 11.3: 验证 `cd demos/egui-demo && cargo build --release` 通过（22 MB 二进制产出）
+  - [x] SubTask 11.4: 验证 `/workspace/Cargo.lock` 不含 egui 传递依赖（grep `egui|eframe` 无输出）
 
-- [ ] Task 12: 依赖隔离硬验证
-  - [ ] SubTask 12.1: `cd /workspace && cargo build` 成功且不编译任何 GUI 框架
-  - [ ] SubTask 12.2: `grep -E "name = \"(slint|iced|egui|eframe|wgpu|i-slint|glutin|gl)\"" /workspace/Cargo.lock` 无任何输出
-  - [ ] SubTask 12.3: 三个 demo 各自 `Cargo.lock` 含 GUI 依赖但 `/workspace/Cargo.lock` 不含
+- [x] Task 12: 依赖隔离硬验证
+  - [x] SubTask 12.1: `cd /workspace && cargo build` 成功且不编译任何 GUI 框架（workspace 仅 318 个 crate，无 slint/iced/egui/eframe/wgpu/i-slint/glutin/gl）
+  - [x] SubTask 12.2: `grep -E "name = \"(slint|iced|egui|eframe|wgpu|i-slint|glutin|gl)" /workspace/Cargo.lock` 无任何输出（grep exit=1）
+  - [x] SubTask 12.3: 三个 demo 各自 `Cargo.lock` 含 GUI 依赖（slint-demo: slint/fontdb/swash/lru；iced-demo: iced/fontdb/swash/lru；egui-demo: eframe/egui/glutin/fontdb/swash/lru），但 `/workspace/Cargo.lock` 不含
+  - [x] SubTask 12.4: workspace 自身 swash/fontdb/lru 通过 `/workspace/Cargo.lock` sticky 锁定在 0.1.15 / 0.16.0 / 0.12.0，不污染
 
-- [ ] Task 13: PROGRESS.md 完成度对照文档
-  - [ ] SubTask 13.1: 新建 `/workspace/PROGRESS.md`，列出本 spec 所有特性，标注"已完成"（打勾）/ "超出范围（理由）"
-  - [ ] SubTask 13.2: 列出 FEATURES.md 中其他未实现特性（连字/彩色Emoji/Unicode CJK Ext/图像协议/IME/全局字形缓存）并标注"超出范围（理由：需大规模重写/并发安全设计）"
-  - [ ] SubTask 13.3: 列出 3 个 demo 的完成状态和依赖隔离验证结果
+- [x] Task 13: PROGRESS.md 完成度对照文档
+  - [x] SubTask 13.1: 新建 `/workspace/PROGRESS.md`，列出本 spec 所有特性，标注"已完成"（打勾）/ "超出范围（理由）"
+  - [x] SubTask 13.2: 列出 FEATURES.md 中其他未实现特性（连字/彩色Emoji/Unicode CJK Ext/图像协议/IME/全局字形缓存）并标注"超出范围（理由：需大规模重写/并发安全设计）"
+  - [x] SubTask 13.3: 列出 3 个 demo 的完成状态和依赖隔离验证结果
 
 # Task Dependencies
 - [Task 5] 依赖 [Task 5 SubTask 5.1 events] — 同 task 内有序

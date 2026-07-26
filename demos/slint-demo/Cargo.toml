@@ -17,10 +17,11 @@ license = "MIT"
 publish = false
 
 [build-dependencies]
-slint-build = "1.6"
+slint-build = "=1.6.0"
 
 [dependencies]
-slint = "1.6"
+# slint 必须用 `=` 精确锁定 1.6.0，否则 caret 会拉最新 1.x（如 1.17.1 要求 rustc 1.92）。
+slint = "=1.6.0"
 sysinfo = "0.30"
 arboard = "3"
 rust-xterm-core = { path = "../../crates/rust-xterm-core" }
@@ -29,3 +30,9 @@ rust-xterm-host = { path = "../../crates/rust-xterm-host" }
 
 # 开发时使用软件渲染后端，避免在无 GPU 环境下链接 OpenGL/EGL
 # （默认 features 已包含 backend-winit + renderer-femtovg；在 headless CI 中编译即可）
+
+# -----------------------------------------------------------------------------
+# 独立工作区声明：使本 crate 成为自身的工作区根，
+# 从而与 /workspace 的 workspace 完全解耦，拥有独立 Cargo.lock。
+# -----------------------------------------------------------------------------
+[workspace]
