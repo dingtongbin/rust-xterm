@@ -31,11 +31,15 @@ pub mod renderer;
 /// 像素缓冲区
 pub mod canvas;
 
+/// 全局共享纹理图集（跨 Renderer 实例 LRU）
+pub mod global_atlas;
+
 // ============================================================================
 // 公共重导出
 // ============================================================================
 
 pub use atlas::{AtlasEntry, AtlasStats, TextureAtlas};
 pub use canvas::{Canvas, PixelFormat};
-pub use font_tree::{FontFace, FontTree, GlyphInfo};
+pub use font_tree::{FontFace, FontTree, GlyphInfo, ShapeGlyph};
+pub use global_atlas::{global_atlas, GlobalAtlas};
 pub use renderer::{RenderMetrics, RenderResult, Renderer, RendererConfig};

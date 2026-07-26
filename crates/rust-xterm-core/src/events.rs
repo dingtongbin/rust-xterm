@@ -13,7 +13,8 @@
 //! | `on_cursor_move` | 光标位置变更 | `onCursorMove` |
 //! | `on_resize` | 终端尺寸变更 | `onResize` |
 //! | `on_selection_change` | 选区变更 | `onSelectionChange` |
-
+//! | `on_preedit_change` | IME 预编辑文本变更 | - |
+//!
 use crate::{CursorMeta, TerminalSize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -60,6 +61,13 @@ pub enum TerminalEvent {
     ///
     /// 宿主可在此时读取 [`crate::TerminalManager::selection_text`] 获取选中文本。
     SelectionReady,
+    /// IME 预编辑文本（composition）变更
+    ///
+    /// 宿主层在 [`crate::TerminalManager::set_preedit`] /
+    /// [`crate::TerminalManager::commit_text`] /
+    /// [`crate::TerminalManager::clear_preedit`] 时触发。
+    /// payload 为当前预编辑文本（空串表示已清空）。
+    PreeditChange(String),
 }
 
 /// 事件回调函数类型

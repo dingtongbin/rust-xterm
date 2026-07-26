@@ -81,11 +81,23 @@ pub struct TextureAtlas {
     row_height: u32,
     /// 动态区 LRU 缓存：Key = (char, bold, italic), Value = AtlasEntry
     dynamic_cache: LruCache<(char, bool, bool), AtlasEntry>,
+    /// Run LRU 缓存：Key = (run_hash, bold, italic), Value = 整条 run 的 AtlasEntry 列表
+    ///
+    /// 用于连字渲染路径：shape_run 产出的 glyph_id 序列哈希为 run_hash，
+    /// 命中时直接复用之前已光栅化并写入图集的 AtlasEntry 列表，
+    /// 避免对同一 run 重复光栅化。
+    run_cache: LruCache<(u64, bool, bool), Vec<AtlasEntry>>,
     /// 静态区缓存：Key = (char, bold, italic), Value = AtlasEntry
     static_cache: std::collections::HashMap<(char, bool, bool), AtlasEntry>,
     /// 统计信息
     stats: AtlasStats,
 }
+
+/// Run 缓存硬上限
+///
+/// 终端中典型 run 数量（同 fg/bg/flags 的连续字符段）远小于字符数，
+/// 256 足以覆盖大多数场景且内存占用可忽略。
+const RUN_CACHE_CAPACITY: usize = 256;
 
 impl TextureAtlas {
     /// 创建新的纹理图集
@@ -113,6 +125,9 @@ impl TextureAtlas {
             dynamic_cursor: (0, static_region_height),
             row_height: row_height.max(1),
             dynamic_cache: LruCache::new(dynamic_capacity),
+            run_cache: LruCache::new(
+                NonZeroUsize::new(RUN_CACHE_CAPACITY).expect("RUN_CACHE_CAPACITY > 0"),
+            ),
             static_cache: std::collections::HashMap::new(),
             stats: AtlasStats::default(),
         }
@@ -233,6 +248,75 @@ impl TextureAtlas {
         Some(entry)
     }
 
+    /// 在动态区分配一个槽位（不写入 `dynamic_cache`）
+    ///
+    /// 用于连字渲染路径：调用方持有 run 级别的 `run_cache`，由其负责
+    /// 将返回的 `AtlasEntry` 与 `run_hash` 关联。本方法仅完成"找槽位 +
+    /// 写像素 + 构造 AtlasEntry"，不按键缓存，避免与单字符路径的
+    /// `(char, bold, italic)` 键冲突。
+    ///
+    /// 与 `insert_dynamic` 共享 `find_dynamic_slot` / `write_pixels`，
+    /// 因此同样会触发动态区回绕（`wrap_around_dynamic`），并在回绕时
+    /// 清空 `dynamic_cache` 与 `run_cache` 防止鬼影。
+    #[allow(clippy::too_many_arguments)]
+    pub fn allocate_dynamic(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        left_bearing: i32,
+        top_bearing: i32,
+        is_color: bool,
+    ) -> Option<AtlasEntry> {
+        let (px, py) = self.find_dynamic_slot(width, height)?;
+        self.write_pixels(px, py, pixels, width, height);
+        Some(AtlasEntry {
+            x: px,
+            y: py,
+            width,
+            height,
+            left_bearing,
+            top_bearing,
+            is_color,
+        })
+    }
+
+    /// 查询 run 缓存（同时更新 LRU）
+    ///
+    /// 命中时返回整条 run 的 `AtlasEntry` 列表克隆，调用方按 cluster 映射
+    /// 回 cell 后逐个合成。未命中返回 `None`，调用方应执行 shape_run +
+    /// 光栅化 + `allocate_dynamic` + `insert_run`。
+    pub fn lookup_run(
+        &mut self,
+        run_hash: u64,
+        bold: bool,
+        italic: bool,
+    ) -> Option<Vec<AtlasEntry>> {
+        if let Some(entries) = self.run_cache.get(&(run_hash, bold, italic)) {
+            self.stats.hits += 1;
+            return Some(entries.clone());
+        }
+        self.stats.misses += 1;
+        None
+    }
+
+    /// 将一条 run 的 `AtlasEntry` 列表写入 run 缓存
+    ///
+    /// `entries` 应已通过 `allocate_dynamic` 写入图集缓冲区。LRU 满时
+    /// 自动淘汰最旧的 run。
+    pub fn insert_run(
+        &mut self,
+        run_hash: u64,
+        bold: bool,
+        italic: bool,
+        entries: Vec<AtlasEntry>,
+    ) {
+        if self.run_cache.len() >= self.run_cache.cap().get() {
+            self.stats.evictions += 1;
+        }
+        self.run_cache.put((run_hash, bold, italic), entries);
+    }
+
     /// 在静态区寻找可用槽位
     fn find_static_slot(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         let (cx, cy) = self.static_cursor;
@@ -280,11 +364,12 @@ impl TextureAtlas {
     /// 动态区回绕：重置写入游标并清空动态缓存
     ///
     /// 回绕意味着动态区从顶部重新开始写入，旧像素会被新字形覆盖。
-    /// 此时必须清空 `dynamic_cache`，否则旧 entry 命中后会从已覆盖的
-    /// 像素区域采样，导致"鬼影"。
+    /// 此时必须清空 `dynamic_cache` 与 `run_cache`，否则旧 entry 命中后
+    /// 会从已覆盖的像素区域采样，导致"鬼影"。
     fn wrap_around_dynamic(&mut self) {
         self.dynamic_cursor = (0, self.static_region_height);
         self.dynamic_cache.clear();
+        self.run_cache.clear();
         self.stats.dynamic_slots = 0;
     }
 
@@ -357,6 +442,7 @@ impl TextureAtlas {
             *byte = 0;
         }
         self.dynamic_cache.clear();
+        self.run_cache.clear();
         self.dynamic_cursor = (0, self.static_region_height);
         self.stats.dynamic_slots = 0;
     }
@@ -448,6 +534,57 @@ mod tests {
         assert!(
             atlas.lookup_dynamic('A', false, false).is_none(),
             "回绕后旧 entry 应被清理，避免鬼影"
+        );
+    }
+
+    #[test]
+    fn test_run_cache_insert_and_lookup() {
+        let mut atlas = TextureAtlas::new(512, 512, 4, 20);
+        // 通过 allocate_dynamic 写入两个槽位
+        let px1 = vec![255u8; 8 * 16 * 4];
+        let px2 = vec![128u8; 8 * 16 * 4];
+        let e1 = atlas
+            .allocate_dynamic(&px1, 8, 16, 0, 0, false)
+            .expect("allocate 1");
+        let e2 = atlas
+            .allocate_dynamic(&px2, 8, 16, 0, 0, false)
+            .expect("allocate 2");
+        // 写入 run_cache
+        atlas.insert_run(0xDEAD, false, false, vec![e1, e2]);
+        // 命中
+        let got = atlas
+            .lookup_run(0xDEAD, false, false)
+            .expect("run 命中应返回 entries");
+        assert_eq!(got.len(), 2);
+        // 未命中
+        assert!(atlas.lookup_run(0xBEEF, false, false).is_none());
+    }
+
+    #[test]
+    fn test_wraparound_clears_run_cache() {
+        // 与 test_wraparound_clears_stale_entries 同样的回绕场景，
+        // 验证 run_cache 也被清空，避免连字路径读到鬼影像素。
+        let mut atlas = TextureAtlas::new(64, 64, 1, 20);
+
+        // 先写入一条 run
+        let pixels = vec![200u8; 8 * 16];
+        let entry = atlas
+            .allocate_dynamic(&pixels, 8, 16, 0, 0, false)
+            .expect("allocate");
+        atlas.insert_run(0x1234, false, false, vec![entry]);
+        assert!(atlas.lookup_run(0x1234, false, false).is_some());
+
+        // 填满动态区触发回绕
+        for i in 0..20u32 {
+            let ch = char::from_u32(0xE000 + i).unwrap();
+            let pixels = vec![100u8; 8 * 16];
+            let _ = atlas.insert_dynamic(ch, false, false, &pixels, 8, 16, 0, 0, false);
+        }
+
+        // 回绕后 run_cache 应被清空
+        assert!(
+            atlas.lookup_run(0x1234, false, false).is_none(),
+            "回绕后 run_cache 应被清理，避免鬼影"
         );
     }
 }

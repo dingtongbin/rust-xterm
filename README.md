@@ -85,6 +85,15 @@ rust-xterm mirrors the familiar xterm.js surface so frontend engineers feel at h
 - **Alternate screen**: DECSET 1049.
 - **CJK**: wide-character width detection, proper double-cell rendering.
 - **Emoji**: color-glyph fast path via `swash` ColorOutline / ColorBitmap.
+- **Ligatures**: GSUB/GPOS shaping via `swash::shape` (toggleable via `RendererConfig::enable_ligatures`).
+- **Smart selection**: double-click detects URLs (`http://`/`https://`/`ftp://`/`file://`/`ssh://`), Unix paths, IPv4/IPv6 — no `regex`/`url` dependency.
+- **Rectangular block selection**: Alt+drag for column-aligned selection.
+- **IME pre-edit**: `set_preedit` / `commit_text` / `clear_preedit` API + `PreeditChange` event; renderer draws underlined pre-edit text at cursor.
+- **Unicode grapheme clusters**: `unicode-segmentation` based selection boundary — ZWJ sequences, flag pairs, skin-tone modifiers stay intact.
+- **Sixel images**: built-in DCS `q` parser (RLE + color registers) → RGBA blit.
+- **iTerm2 inline images**: OSC 1337 `File=inline=1` parser with PNG/JPEG decoding.
+- **Global glyph cache**: `GlobalAtlas` (`OnceLock<Arc<Mutex<TextureAtlas>>>`) shares glyphs across `Renderer` instances.
+- **Sub-row dirty tracking**: `mark_span_dirty(row, col_start, col_end)` + `DirtySpan` + `render_row_segment` for column-level repaint.
 
 ## GUI demos
 
@@ -104,7 +113,7 @@ rust-xterm-core has **zero** GUI dependencies. To embed it:
 
 1. Drive `TerminalManager::write` from your PTY / SSH source.
 2. Poll `TerminalManager::poll_frame` on a 60 fps timer.
-3. Push `frame.dirty_cells` into your GPU texture / Skia / Slint image.
+3. Push `frame.dirty_spans` into your GPU texture / Skia / Slint image.
 4. Forward user keystrokes via `TerminalManager::write` (encoded) or your PTY bridge.
 
 See `examples/` for a headless demo and `crates/rust-xterm-host` for a `portable-pty` bridge.

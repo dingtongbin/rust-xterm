@@ -48,6 +48,14 @@ anyhow = "1.0"
 # 注意：wezterm-term 依赖 bitflags 1.x，这里保持兼容
 bitflags = "1.3"
 
+# === Unicode 处理 ===
+# grapheme cluster 边界（ZWJ 序列 / 国旗对 / 肤色修饰符），MSRV 1.61
+unicode-segmentation = "1.12"
+
+# === 图像解码 ===
+# iTerm2 inline image 的 PNG/JPEG 解码，MSRV 1.70；仅启用 png+jpeg 减小体积
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
 # === PTY 桥接（仅 rust-xterm-host）===
 portable-pty = "0.8"
 

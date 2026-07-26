@@ -1837,10 +1837,12 @@ dependencies = [
  "anyhow",
  "criterion",
  "encoding_rs",
+ "image",
  "log",
  "sysinfo",
  "tattoy-wezterm-surface",
  "tattoy-wezterm-term",
+ "unicode-segmentation",
  "wezterm-bidi",
 ]
 
@@ -1861,6 +1863,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "fontdb",
+ "image",
  "log",
  "lru",
  "rust-xterm-core",

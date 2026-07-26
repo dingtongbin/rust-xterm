@@ -31,14 +31,18 @@ use crate::buffer::{self, Buffer, BufferNamespace, BufferType, Marker};
 use crate::codec_gate::{Codec, CodecGate};
 use crate::damage::{DamageTracker, DirtyRect};
 use crate::events::{EventBus, EventSubscription, TerminalEvent};
+use crate::image::{ImagePlacement, ImageStore};
+use crate::iterm2::parse_iterm2_osc_payload;
 use crate::mouse::{KeyMods, MouseAction, MouseButton, MouseState};
 use crate::parser::Parser;
 use crate::selection::SelectionRange;
+use crate::sixel::parse_sixel;
 use crate::state::RuntimeState;
 use crate::theme::WindowsTerminalTheme;
 use crate::wezterm_core::{ScreenSnapshot, WezTermCore};
 use crate::{Color, CursorMeta, TerminalSize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// 帧更新数据
@@ -50,18 +54,28 @@ pub struct FrameUpdate {
     pub dirty_rects: Vec<DirtyRect>,
     /// 光标元信息
     pub cursor: CursorMeta,
-    /// 屏幕快照（仅包含脏区行的数据）
-    pub dirty_cells: Vec<DirtyRow>,
+    /// 屏幕快照（仅包含脏区行的数据，带列级范围）
+    pub dirty_spans: Vec<DirtySpan>,
     /// 当前 seqno
     pub seqno: u64,
+    /// 当前 IME 预编辑文本（composition）
+    ///
+    /// 渲染层应在 cursor 行的 cursor 列之后绘制带下划线的预编辑文本。
+    /// `None` 表示无预编辑文本；`Some("")` 表示已清空（仍需重绘 cursor 行
+    /// 以擦除上一帧的预编辑文本）。
+    pub preedit: Option<String>,
 }
 
-/// 脏行数据
+/// 脏行数据（带列级范围）
 #[derive(Debug, Clone)]
-pub struct DirtyRow {
+pub struct DirtySpan {
     /// 行索引
-    pub y: usize,
-    /// 该行的 Cell 数据
+    pub row: usize,
+    /// 脏列起始（0-based，闭区间）
+    pub col_start: usize,
+    /// 脏列结束（0-based，开区间，等于 cols 表示整行脏）
+    pub col_end: usize,
+    /// 该行的完整 Cell 数据（包含整行；col_start/col_end 仅提示渲染层重绘范围）
     pub cells: Vec<crate::RustXtermCell>,
 }
 
@@ -102,6 +116,20 @@ pub struct TerminalManager {
     selection: Option<SelectionRange>,
     /// 12. 鼠标选区状态机（点击计数、拖拽起点等）
     mouse_state: MouseState,
+    /// 13. 已放置的图像（Sixel / iTerm2 inline image）
+    images: ImageStore,
+    /// 14. OSC 1337 handler 推送的待处理 iTerm2 图像
+    ///
+    /// OSC handler 闭包无法直接访问 `&mut self`，故通过 `Arc<Mutex<>>`
+    /// 在 handler 与 manager 间共享。`scan_and_dispatch` 末尾会 drain
+    /// 该缓冲，按当前光标位置设置 `row`/`col` 后追加到 `self.images`。
+    pending_iterm2: Arc<Mutex<Vec<ImagePlacement>>>,
+    /// 15. IME 预编辑文本（composition）
+    ///
+    /// 由宿主层在 IME 候选变化时通过 [`Self::set_preedit`] 设置。
+    /// 渲染层会在 cursor 行的 cursor 列之后绘制带下划线的预编辑文本。
+    /// 不写入 PTY；用户确认后应调用 [`Self::commit_text`]。
+    composition: Option<String>,
 }
 
 impl TerminalManager {
@@ -131,6 +159,20 @@ impl TerminalManager {
             }
         });
 
+        // 注册内部 OSC 1337 handler，解析 iTerm2 inline image。
+        // handler 仅做 base64 + PNG/JPEG 解码并将结果推入 pending_iterm2 缓冲；
+        // `scan_and_dispatch` 末尾按当前光标位置设置 row/col 后存入 self.images。
+        // 注意：用户通过 `parser()` 注册自己的 OSC 1337 handler 会覆盖此内部 handler。
+        let pending_iterm2: Arc<Mutex<Vec<ImagePlacement>>> = Arc::new(Mutex::new(Vec::new()));
+        let pending_for_osc1337 = pending_iterm2.clone();
+        parser.register_osc(1337, move |data: &[u8]| {
+            if let Some(placement) = parse_iterm2_osc_payload(data) {
+                if let Ok(mut guard) = pending_for_osc1337.lock() {
+                    guard.push(placement);
+                }
+            }
+        });
+
         Self {
             core: WezTermCore::new(size, Default::default()),
             codec: CodecGate::new(codec),
@@ -148,6 +190,9 @@ impl TerminalManager {
             bell_pending: false,
             selection: None,
             mouse_state: MouseState::default(),
+            images: ImageStore::new(),
+            pending_iterm2,
+            composition: None,
         }
     }
 
@@ -184,21 +229,29 @@ impl TerminalManager {
         let before_cursor = self.core.cursor_meta();
         let before_scrollback = self.core.max_scrollback();
 
-        // 3. 轻量 OSC/BEL 扫描：在喂入 WezTerm 之前，先扫描输入字节，
+        // 3. 扫描并剥离 DCS 序列（Sixel 解析）。
+        //    DCS 序列不传给 WezTerm，由本地 Sixel 解析器处理；
+        //    解析成功的图像存入 self.images，并标记起始行为脏。
+        let filtered = self.scan_and_strip_dcs(utf8_str.as_bytes());
+
+        // 4. 轻量 OSC/BEL 扫描：在喂入 WezTerm 之前，先扫描过滤后的字节，
         //    将 OSC 序列派发给自定义 handler，并检测 BEL 字节。
         //    注意：仅 OSC，不拦截 CSI/DCS，避免与 WezTerm 重复处理。
-        self.scan_and_dispatch(utf8_str.as_bytes());
+        if !filtered.is_empty() {
+            self.scan_and_dispatch(&filtered);
 
-        // 4. 喂入状态机
-        self.core.advance_bytes(&utf8_str);
+            // 5. 喂入状态机（DCS 序列已被剥离）
+            let filtered_str = String::from_utf8_lossy(&filtered);
+            self.core.advance_bytes(&filtered_str);
+        }
 
-        // 5. 标记脏区
+        // 6. 标记脏区
         let changed_rows = self.core.changed_rows_since(before_seqno);
         for row in changed_rows {
             self.damage.mark_dirty(row);
         }
 
-        // 6. 更新 scrollback 偏移（Task 4：Marker 滚动追踪）
+        // 7. 更新 scrollback 偏移（Task 4：Marker 滚动追踪）
         let after_scrollback = self.core.max_scrollback();
         if let Some(delta) = after_scrollback.checked_sub(before_scrollback) {
             if delta > 0 {
@@ -206,8 +259,66 @@ impl TerminalManager {
             }
         }
 
-        // 7. 触发事件（xterm.js 风格）
+        // 8. 触发事件（xterm.js 风格）
         self.emit_state_events(before_cursor);
+    }
+
+    /// 扫描并剥离 DCS 序列（`\x1bP...ST`/`\x1bP...BEL`）
+    ///
+    /// 识别 `\x1bP` 开头、`ST`（`\x1b\\`）或 `BEL`（`\x07`）结尾的 DCS 序列，
+    /// 尝试用 [`parse_sixel`] 解析为 Sixel 图像；解析成功则存入 `self.images`，
+    /// 并以当前光标位置作为放置起始行列。返回剥离 DCS 后的剩余字节，
+    /// 由调用方继续喂入 WezTerm。
+    ///
+    /// 未识别的 DCS 序列（非 Sixel）同样被剥离，不传给 WezTerm。
+    /// 若 DCS 序列在本次 write 中未闭合，则丢弃尾部（不跨 write 缓冲）。
+    fn scan_and_strip_dcs(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let len = bytes.len();
+        let mut filtered: Vec<u8> = Vec::with_capacity(len);
+        let mut i = 0;
+
+        while i < len {
+            // 检测 DCS 开始：ESC P (0x1b 0x50)
+            if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == 0x50 {
+                let start = i;
+                i += 2;
+                // 查找序列结束：BEL (0x07) 或 ST (0x1b 0x5c)
+                let mut end = None;
+                while i < len {
+                    if bytes[i] == 0x07 {
+                        end = Some(i + 1); // 包含 BEL
+                        break;
+                    }
+                    if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == 0x5c {
+                        end = Some(i + 2); // 包含 \x1b\\
+                        break;
+                    }
+                    i += 1;
+                }
+                if let Some(end) = end {
+                    let dcs = &bytes[start..end];
+                    // 尝试 Sixel 解析
+                    if let Some(mut placement) = parse_sixel(dcs) {
+                        let cursor = self.core.cursor_meta();
+                        placement.row = cursor.y;
+                        placement.col = cursor.x;
+                        self.images.add(placement);
+                        // 标记光标所在行为脏，触发重绘。
+                        // 渲染层会在每帧调用 render_image 渲染所有图像。
+                        self.damage.mark_dirty(cursor.y);
+                    }
+                    i = end;
+                } else {
+                    // 未闭合的 DCS 序列：丢弃剩余字节（不跨 write 缓冲）
+                    i = len;
+                }
+            } else {
+                filtered.push(bytes[i]);
+                i += 1;
+            }
+        }
+
+        filtered
     }
 
     /// 轻量 OSC/BEL 扫描
@@ -280,6 +391,20 @@ impl TerminalManager {
             }
             i += 1;
         }
+
+        // drain OSC 1337 handler 推送的 iTerm2 图像，按当前光标位置存入 self.images。
+        // 注意：此时尚未调用 advance_bytes，光标位置即为 OSC 序列被发出时的位置。
+        if let Ok(mut guard) = self.pending_iterm2.lock() {
+            if !guard.is_empty() {
+                let cursor = self.core.cursor_meta();
+                for mut placement in guard.drain(..) {
+                    placement.row = cursor.y;
+                    placement.col = cursor.x;
+                    self.images.add(placement);
+                }
+                self.damage.mark_dirty(cursor.y);
+            }
+        }
     }
 
     /// 检查并触发状态变更事件
@@ -329,14 +454,92 @@ impl TerminalManager {
         encoded
     }
 
+    /// 设置 IME 预编辑文本（composition）
+    ///
+    /// 宿主层在 IME 候选变化时调用。下一帧 cursor 行将渲染带下划线的预编辑文本。
+    /// 不会写入 PTY；最终用户确认后应调用 [`Self::commit_text`]。
+    pub fn set_preedit(&mut self, text: &str) {
+        let new = if text.is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        };
+        if new != self.composition {
+            self.composition = new;
+            let cursor = self.core.cursor_meta();
+            self.damage.mark_dirty(cursor.y);
+            self.events
+                .emit(&TerminalEvent::PreeditChange(text.to_string()));
+        }
+    }
+
+    /// 提交 IME 预编辑文本
+    ///
+    /// 把文本写入 PTY（经编码闸门 + 本地回显），并清空 composition。
+    /// 返回应发送给 PTY 的字节流（同 [`Self::write_input`]）。
+    pub fn commit_text(&mut self, text: &str) -> Vec<u8> {
+        // 先清 composition（避免下一帧仍渲染预编辑文本）
+        let had_preedit = self.composition.is_some();
+        self.composition = None;
+        if had_preedit {
+            let cursor = self.core.cursor_meta();
+            self.damage.mark_dirty(cursor.y);
+            self.events
+                .emit(&TerminalEvent::PreeditChange(String::new()));
+        }
+        // 复用 write_input：编码 + 本地回显 + 推进状态机
+        self.write_input(text)
+    }
+
+    /// 清除 IME 预编辑文本（不提交）
+    ///
+    /// 宿主层在 IME 取消时调用。
+    pub fn clear_preedit(&mut self) {
+        if self.composition.is_some() {
+            self.composition = None;
+            let cursor = self.core.cursor_meta();
+            self.damage.mark_dirty(cursor.y);
+            self.events
+                .emit(&TerminalEvent::PreeditChange(String::new()));
+        }
+    }
+
+    /// 获取当前 IME 预编辑文本
+    pub fn preedit(&self) -> Option<&str> {
+        self.composition.as_deref()
+    }
+
     /// 调整终端尺寸
+    ///
+    /// resize 会触发屏幕 reflow，原有选区坐标在新布局下失效，
+    /// 因此在执行 resize 前清除选区并派发 [`TerminalEvent::SelectionChange`]。
     pub fn resize(&mut self, size: TerminalSize) {
+        // 清除选区（reflow 后位置失效）
+        if self.selection.is_some() {
+            self.selection = None;
+            self.events.emit(&TerminalEvent::SelectionChange);
+        }
         let old_size = self.core.size();
         self.core.resize(size);
         self.damage.resize(size.rows, size.cols);
         // BufferNamespace 不再持有影子 Buffer 状态，无需 resize
         if old_size != size {
             self.events.emit(&TerminalEvent::Resize(size));
+        }
+    }
+
+    /// 设置 scrollback 滚动偏移
+    ///
+    /// 宿主层在用户滚屏查看历史时调用。滚动后原有选区的可视行坐标
+    /// 不再对应同一物理行，因此清除选区并派发 [`TerminalEvent::SelectionChange`]。
+    ///
+    /// 注意：实际的 viewport 滚动状态由宿主层维护（核心层无相关字段），
+    /// 本方法仅负责清选区副作用；`offset` 参数供宿主层语义化使用。
+    pub fn scrollback_scroll(&mut self, _offset: usize) {
+        // scrollback 滚动后选区位置失效
+        if self.selection.is_some() {
+            self.selection = None;
+            self.events.emit(&TerminalEvent::SelectionChange);
         }
     }
 
@@ -362,23 +565,72 @@ impl TerminalManager {
         // 推进光标闪烁（仅在需要渲染时才推进）
         self.state.advance_blink(now);
 
-        // 提取脏矩形
-        let dirty_rects = self.damage.drain_rects();
+        // SubTask 9.4：若存在已放置的图像，把每个 placement 起始行标为脏，
+        // 确保本次帧的脏行列表包含图像区域，渲染层据此调用 render_image 重绘。
+        // 仅在已经要渲染帧时标记（has_damage || blink_due），不引入额外帧。
+        if !self.images.is_empty() {
+            for p in self.images.placements() {
+                self.damage.mark_dirty(p.row);
+            }
+        }
+
+        // SubTask 6.2: 若存在 IME 预编辑文本，把 cursor 行标为脏，
+        // 确保本帧的脏行列表包含 cursor 行，渲染层据此绘制 composition。
+        if self.composition.is_some() {
+            let cursor = self.core.cursor_meta();
+            self.damage.mark_dirty(cursor.y);
+        }
+
+        // 提取脏 span（行级 + 列级）
+        let spans = self.damage.drain_spans();
+
+        // 派生 DirtyRect：合并连续整行 span 为单个矩形（保持旧行为）；
+        // 部分 span（col_start > 0 或 col_end < cols）独立成单行矩形。
+        let cols = self.core.size().cols;
+        let mut dirty_rects: Vec<DirtyRect> = Vec::new();
+        {
+            // 先按 row 排序
+            let mut sorted: Vec<(usize, usize, usize)> = spans.clone();
+            sorted.sort_by_key(|&(r, _, _)| r);
+            let mut i = 0;
+            while i < sorted.len() {
+                let (r, cs, ce) = sorted[i];
+                if cs == 0 && ce >= cols {
+                    // 整行：尝试合并连续整行
+                    let start_row = r;
+                    let mut end_row = r + 1;
+                    while i + 1 < sorted.len() {
+                        let (r2, cs2, ce2) = sorted[i + 1];
+                        if r2 == end_row && cs2 == 0 && ce2 >= cols {
+                            end_row = r2 + 1;
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    dirty_rects.push(DirtyRect::full_width(start_row, cols, end_row - start_row));
+                } else {
+                    // 部分 span：单行矩形
+                    dirty_rects.push(DirtyRect::new(cs, r, ce - cs, 1));
+                }
+                i += 1;
+            }
+        }
 
         // 获取屏幕快照
         let snapshot = self.core.screen_snapshot(self.default_fg, self.default_bg);
         let seqno = snapshot.seqno;
 
-        // 提取脏行数据
-        let mut dirty_cells = Vec::new();
-        for rect in &dirty_rects {
-            for y in rect.y..(rect.y + rect.height) {
-                if let Some(row) = snapshot.rows.get(y) {
-                    dirty_cells.push(DirtyRow {
-                        y,
-                        cells: row.clone(),
-                    });
-                }
+        // 提取脏 span 数据（行级 + 列级）
+        let mut dirty_spans = Vec::new();
+        for &(row, cs, ce) in spans.iter() {
+            if let Some(row_cells) = snapshot.rows.get(row) {
+                dirty_spans.push(DirtySpan {
+                    row,
+                    col_start: cs,
+                    col_end: ce,
+                    cells: row_cells.clone(),
+                });
             }
         }
 
@@ -395,8 +647,9 @@ impl TerminalManager {
         Some(FrameUpdate {
             dirty_rects,
             cursor,
-            dirty_cells,
+            dirty_spans,
             seqno,
+            preedit: self.composition.clone(),
         })
     }
 
@@ -501,7 +754,7 @@ impl TerminalManager {
         y: usize,
         action: MouseAction,
         button: MouseButton,
-        _mods: KeyMods,
+        mods: KeyMods,
     ) {
         // 仅左键参与选区交互
         if button != MouseButton::Left {
@@ -526,14 +779,15 @@ impl TerminalManager {
 
                 match self.mouse_state.click_count {
                     1 => {
-                        // 单击：清旧选区，记录拖拽起点
+                        // 单击：清旧选区，记录拖拽起点，并记录 Alt 状态供拖拽决定矩形模式
                         self.selection = None;
                         self.mouse_state.selecting = true;
                         self.mouse_state.select_start = pos;
+                        self.mouse_state.alt_held = mods.alt;
                         self.events.emit(&TerminalEvent::SelectionChange);
                     }
                     2 => {
-                        // 双击：选词
+                        // 双击：选词（Alt 不影响，仍为线性）
                         self.mouse_state.selecting = true;
                         let snapshot = self.screen_snapshot();
                         let range = buffer::select_word(pos, &snapshot.rows);
@@ -541,7 +795,7 @@ impl TerminalManager {
                         self.events.emit(&TerminalEvent::SelectionChange);
                     }
                     3 => {
-                        // 三击：选行
+                        // 三击：选行（Alt 不影响，仍为线性）
                         self.mouse_state.selecting = true;
                         let snapshot = self.screen_snapshot();
                         let range = buffer::select_line(pos, &snapshot.rows);
@@ -552,13 +806,13 @@ impl TerminalManager {
                 }
             }
             MouseAction::Move => {
-                // 拖拽扩展选区（仅单击后的拖拽）
+                // 拖拽扩展选区（仅单击后的拖拽）；矩形与否由按下时 Alt 状态决定
                 if self.mouse_state.selecting && self.mouse_state.click_count == 1 {
                     let start = self.mouse_state.select_start;
                     self.selection = Some(SelectionRange {
                         start,
                         end: pos,
-                        rectangular: false,
+                        rectangular: self.mouse_state.alt_held,
                     });
                     self.events.emit(&TerminalEvent::SelectionChange);
                 }
@@ -578,7 +832,18 @@ impl TerminalManager {
     /// 设置当前选区（程序化 API）
     ///
     /// 传入 `None` 清除选区。会派发 [`TerminalEvent::SelectionChange`] 事件。
+    ///
+    /// 入参 `range` 的 `start`/`end` 坐标会被 clamp 到当前尺寸范围内
+    /// `(0..rows-1, 0..cols-1)`，避免越界访问屏幕缓冲。
     pub fn set_selection(&mut self, range: Option<SelectionRange>) {
+        let range = range.map(|mut r| {
+            let (rows, cols) = (self.core.size().rows, self.core.size().cols);
+            r.start.0 = r.start.0.min(rows.saturating_sub(1));
+            r.start.1 = r.start.1.min(cols.saturating_sub(1));
+            r.end.0 = r.end.0.min(rows.saturating_sub(1));
+            r.end.1 = r.end.1.min(cols.saturating_sub(1));
+            r
+        });
         self.selection = range;
         self.events.emit(&TerminalEvent::SelectionChange);
     }
@@ -683,6 +948,18 @@ impl TerminalManager {
     /// 获取对 DamageTracker 的不可变引用（高级 API）
     pub fn damage(&self) -> &DamageTracker {
         &self.damage
+    }
+
+    /// 获取已放置的图像列表（Sixel / iTerm2 inline image）
+    ///
+    /// 渲染层应在每帧遍历 `images.placements()` 调用 `Renderer::render_image`。
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    /// 获取图像存储的可变引用（高级 API）
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        &mut self.images
     }
 
     /// 获取对 Parser 的可变引用，用于注册自定义 OSC/CSI/DCS handler
@@ -836,7 +1113,7 @@ mod tests {
 
         let frame = frame.unwrap();
         assert!(!frame.dirty_rects.is_empty());
-        assert!(!frame.dirty_cells.is_empty());
+        assert!(!frame.dirty_spans.is_empty());
     }
 
     #[test]
@@ -1319,5 +1596,375 @@ mod tests {
         let _ = mgr.poll_frame(Instant::now());
         let snap = mgr.screen_snapshot();
         assert_eq!(snap.rows[0][0].text, "A", "覆盖后 col 0 应为 A");
+    }
+
+    // ========================================================================
+    // Task 4: 矩形块选模式
+    // ========================================================================
+
+    /// Task 4: Alt+左键按下拖拽应产生矩形选区
+    #[test]
+    fn test_alt_drag_rectangular() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        mgr.write(b"hello\r\nworld");
+        let _ = mgr.poll_frame(Instant::now());
+
+        // Alt 按下
+        let mods = KeyMods {
+            alt: true,
+            ..KeyMods::default()
+        };
+        // 按下左键于 (col=1, row=0)
+        mgr.mouse_event(1, 0, MouseAction::Press, MouseButton::Left, mods);
+        // 拖拽到 (col=3, row=1)
+        mgr.mouse_event(3, 1, MouseAction::Move, MouseButton::Left, mods);
+        let sel = mgr.selection().expect("拖拽应产生选区");
+        assert!(
+            sel.rectangular,
+            "Alt+左键拖拽应产生矩形选区，got rectangular={}",
+            sel.rectangular
+        );
+        assert_eq!(sel.start, (0, 1));
+        assert_eq!(sel.end, (1, 3));
+    }
+
+    /// Task 4: 无 Alt 拖拽应产生线性选区
+    #[test]
+    fn test_no_alt_linear() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        mgr.write(b"hello\r\nworld");
+        let _ = mgr.poll_frame(Instant::now());
+
+        let mods = KeyMods::default();
+        // 按下左键于 (col=0, row=0)
+        mgr.mouse_event(0, 0, MouseAction::Press, MouseButton::Left, mods);
+        // 拖拽到 (col=4, row=1)
+        mgr.mouse_event(4, 1, MouseAction::Move, MouseButton::Left, mods);
+        let sel = mgr.selection().expect("拖拽应产生选区");
+        assert!(
+            !sel.rectangular,
+            "无 Alt 拖拽应产生线性选区，got rectangular={}",
+            sel.rectangular
+        );
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end, (1, 4));
+    }
+
+    // ========================================================================
+    // Task 5: 选区一致性校验
+    // ========================================================================
+
+    /// Task 5: resize 应清除选区并派发 SelectionChange
+    #[test]
+    fn test_resize_clears_selection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        mgr.write(b"hello world");
+        let _ = mgr.poll_frame(Instant::now());
+
+        // 设置选区
+        mgr.set_selection(Some(SelectionRange::linear((0, 0), (0, 4))));
+        assert!(mgr.selection().is_some(), "前置：选区应已设置");
+
+        // 订阅 SelectionChange 事件
+        let changes = Arc::new(AtomicUsize::new(0));
+        let c = changes.clone();
+        let _sub = mgr.on(move |event| {
+            if matches!(event, TerminalEvent::SelectionChange) {
+                c.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        // resize 应清除选区并派发 SelectionChange
+        mgr.resize(TerminalSize::new(10, 20));
+        assert!(mgr.selection().is_none(), "resize 后选区应被清除");
+        assert!(
+            changes.load(Ordering::Relaxed) > 0,
+            "resize 清选区应派发 SelectionChange"
+        );
+    }
+
+    /// Task 5: set_selection 入参坐标应被 clamp 到 size-1
+    #[test]
+    fn test_set_selection_clamp() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        // 传入超界坐标 (row=999, col=999)
+        mgr.set_selection(Some(SelectionRange::linear((999, 999), (999, 999))));
+        let sel = mgr.selection().expect("set_selection 应保留选区");
+        // 5 行 → 最大 row 索引 4；10 列 → 最大 col 索引 9
+        assert_eq!(
+            sel.start,
+            (4, 9),
+            "start 应被 clamp 到 (rows-1, cols-1) = (4, 9)"
+        );
+        assert_eq!(
+            sel.end,
+            (4, 9),
+            "end 应被 clamp 到 (rows-1, cols-1) = (4, 9)"
+        );
+    }
+
+    /// Task 5: scrollback_scroll 应清除选区
+    #[test]
+    fn test_scrollback_scroll_clears_selection() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        mgr.write(b"hello world");
+        let _ = mgr.poll_frame(Instant::now());
+
+        mgr.set_selection(Some(SelectionRange::linear((0, 0), (0, 4))));
+        assert!(mgr.selection().is_some(), "前置：选区应已设置");
+
+        mgr.scrollback_scroll(3);
+        assert!(
+            mgr.selection().is_none(),
+            "scrollback_scroll 后选区应被清除"
+        );
+    }
+
+    /// SubTask 9.3：write 中的 DCS Sixel 序列应被分流到 Sixel 解析器并存入 images
+    #[test]
+    fn test_sixel_dcs_diverted_to_images() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        assert!(mgr.images().is_empty(), "初始状态无图像");
+
+        // 1 像素列 × 6 像素行红色 Sixel
+        let seq = b"\x1bPq#0;2;100;0;0#0~\x1b\\";
+        mgr.write(seq);
+
+        assert_eq!(mgr.images().len(), 1, "Sixel 应被解析并存入 images");
+        let p = &mgr.images().placements()[0];
+        assert_eq!(p.width, 1, "宽度应为 1 像素");
+        assert_eq!(p.height, 6, "高度应为 6 像素");
+        // 颜色应为红色
+        assert_eq!(p.rgba[0], 255, "R 应为 255");
+        assert_eq!(p.rgba[1], 0, "G 应为 0");
+        assert_eq!(p.rgba[2], 0, "B 应为 0");
+        assert_eq!(p.rgba[3], 255, "A 应为 255");
+        // 行列应被设置为当前光标位置（初始 0,0）
+        assert_eq!(p.row, 0, "row 应为光标 y");
+        assert_eq!(p.col, 0, "col 应为光标 x");
+    }
+
+    /// SubTask 9.3：DCS 序列应被剥离，不传给 WezTerm（混合普通文本 + Sixel）
+    #[test]
+    fn test_dcs_stripped_from_stream() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // "AB" + Sixel + "CD" —— Sixel 被剥离，AB/CD 正常处理
+        let seq = b"AB\x1bPq#0;2;100;0;0#0~\x1b\\CD";
+        mgr.write(seq);
+
+        // 图像应被解析
+        assert_eq!(mgr.images().len(), 1, "Sixel 应被解析");
+        // 不应 panic，且后续字符 CD 应被正常处理（通过 poll_frame 不报错验证）
+        let frame = mgr.poll_frame(Instant::now());
+        assert!(frame.is_some(), "应有帧更新");
+    }
+
+    /// SubTask 9.3：BEL 终止的 DCS 序列同样被处理
+    #[test]
+    fn test_dcs_bel_terminator() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        let seq = b"\x1bPq#0;2;0;100;0#0~\x07";
+        mgr.write(seq);
+        assert_eq!(mgr.images().len(), 1, "BEL 终止的 Sixel 应被解析");
+        let p = &mgr.images().placements()[0];
+        // 绿色 (0, 255, 0)
+        assert_eq!(p.rgba[1], 255, "G 应为 255");
+    }
+
+    /// SubTask 9.3：非 Sixel DCS 序列也被剥离（不传给 WezTerm）
+    #[test]
+    fn test_non_sixel_dcs_stripped() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // 一个非 Sixel DCS 序列（无 q，不会被 parse_sixel 解析）
+        let seq = b"text\x1bP1$q\x1b\\more";
+        mgr.write(seq);
+        // 无图像被存储
+        assert!(mgr.images().is_empty(), "非 Sixel DCS 不应产生图像");
+        // 不 panic 即通过
+    }
+
+    /// SubTask 9.4：poll_frame 时若存在图像，其起始行应被标为脏
+    #[test]
+    fn test_poll_frame_marks_image_rows_dirty() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // 把光标移到第 3 行：写入 3 个换行
+        mgr.write(b"\n\n\n");
+        // 写入 Sixel 图像（光标在第 3 行附近）
+        let seq = b"\x1bPq#0;2;100;0;0#0~\x1b\\";
+        mgr.write(seq);
+        assert_eq!(mgr.images().len(), 1);
+
+        // 第一次 poll_frame：应有帧更新（图像行已被标脏）
+        let frame = mgr.poll_frame(Instant::now());
+        assert!(frame.is_some(), "应有帧更新");
+        let frame = frame.unwrap();
+        // 图像起始行应在 dirty_rects 覆盖范围内
+        let img_row = mgr.images().placements()[0].row;
+        let covered = frame
+            .dirty_rects
+            .iter()
+            .any(|r| img_row >= r.y && img_row < r.y + r.height);
+        assert!(covered, "图像起始行 {img_row} 应在 dirty_rects 覆盖范围内");
+    }
+
+    // ========================================================================
+    // Task 10: iTerm2 inline image（OSC 1337）
+    // ========================================================================
+
+    /// SubTask 10.4：OSC 1337 inline image 应被解析并存入 images
+    #[test]
+    fn test_iterm2_inline_image_stored() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        assert!(mgr.images().is_empty(), "初始状态无图像");
+
+        // 1x1 红色不透明 PNG 的 base64
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==";
+        // ESC ] 1337 ; File=inline=1;width=1px;height=1px:<base64> BEL
+        let seq = format!("\x1b]1337;File=inline=1;width=1px;height=1px:{b64}\x07");
+        mgr.write(seq.as_bytes());
+
+        assert_eq!(mgr.images().len(), 1, "iTerm2 图像应被解析并存入 images");
+        let p = &mgr.images().placements()[0];
+        assert_eq!(p.width, 1, "宽度应为 1 像素");
+        assert_eq!(p.height, 1, "高度应为 1 像素");
+        assert_eq!(p.rgba.len(), 4);
+        assert_eq!(p.rgba[0], 255, "R 应为 255");
+        assert_eq!(p.rgba[1], 0, "G 应为 0");
+        assert_eq!(p.rgba[2], 0, "B 应为 0");
+        assert_eq!(p.rgba[3], 255, "A 应为 255");
+        // row/col 应为初始光标位置 (0, 0)
+        assert_eq!(p.row, 0, "row 应为光标 y");
+        assert_eq!(p.col, 0, "col 应为光标 x");
+    }
+
+    /// SubTask 10.4：OSC 1337 以 ST 终止符也应被解析
+    #[test]
+    fn test_iterm2_inline_image_st_terminator() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==";
+        // ESC ] 1337 ; File=inline=1:<base64> ESC \
+        let seq = format!("\x1b]1337;File=inline=1:{b64}\x1b\\");
+        mgr.write(seq.as_bytes());
+        assert_eq!(mgr.images().len(), 1, "ST 终止的 OSC 1337 也应被解析");
+        let p = &mgr.images().placements()[0];
+        assert_eq!(&p.rgba[..], &[255, 0, 0, 255]);
+    }
+
+    /// SubTask 10.4：用户覆盖 OSC 1337 handler 后内部解析被旁路
+    #[test]
+    fn test_iterm2_handler_overridable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        // 用户注册自己的 OSC 1337 handler（覆盖内部 handler）
+        mgr.parser().register_osc(1337, move |_data| {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==";
+        let seq = format!("\x1b]1337;File=inline=1:{b64}\x07");
+        mgr.write(seq.as_bytes());
+        assert!(counter.load(Ordering::Relaxed) > 0, "用户 handler 应被调用");
+        assert!(mgr.images().is_empty(), "用户覆盖后内部 handler 不应再存图");
+    }
+
+    /// SubTask 10.4：OSC 1337 与普通文本混合，图像与文本应各自正确处理
+    #[test]
+    fn test_iterm2_mixed_with_text() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        let b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==";
+        let seq = format!("AB\x1b]1337;File=inline=1:{b64}\x07CD");
+        mgr.write(seq.as_bytes());
+        assert_eq!(mgr.images().len(), 1, "图像应被解析");
+        // 文本应被正常处理（poll_frame 不 panic）
+        let frame = mgr.poll_frame(Instant::now());
+        assert!(frame.is_some(), "应有帧更新");
+    }
+
+    // ========================================================================
+    // Task 6: IME 预编辑（composition）
+    // ========================================================================
+
+    /// Task 6: set_preedit 应将 cursor 行标为脏，并在下一帧包含 preedit 文本
+    #[test]
+    fn test_set_preedit_marks_dirty() {
+        let mut m = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // 先 drain 一次（构造时 resize 会 mark_all_dirty）
+        let _ = m.poll_frame(Instant::now());
+        // 设置 preedit
+        m.set_preedit("你好");
+        // 下一帧应包含 cursor 行
+        let frame = m
+            .poll_frame(Instant::now())
+            .expect("preedit triggers frame");
+        let cursor_row = frame.cursor.y;
+        assert!(frame.dirty_spans.iter().any(|r| r.row == cursor_row));
+        assert_eq!(frame.preedit.as_deref(), Some("你好"));
+    }
+
+    /// Task 6: commit_text 应将文本写入 PTY 并清空 composition
+    #[test]
+    fn test_commit_text_writes_pty() {
+        let mut m = TerminalManager::utf8(TerminalSize::new(24, 80));
+        m.set_preedit("你好");
+        let out = m.commit_text("你好");
+        // UTF-8 编码 = 原字节
+        assert_eq!(out, "你好".as_bytes());
+        // composition 应已清空
+        assert!(m.preedit().is_none());
+    }
+
+    /// Task 6: clear_preedit 应清空 composition
+    #[test]
+    fn test_clear_preedit() {
+        let mut m = TerminalManager::utf8(TerminalSize::new(24, 80));
+        m.set_preedit("x");
+        assert!(m.preedit().is_some());
+        m.clear_preedit();
+        assert!(m.preedit().is_none());
+    }
+
+    /// Task 6: set_preedit / clear_preedit 应触发 PreeditChange 事件
+    #[test]
+    fn test_preedit_change_event() {
+        use std::sync::{Arc, Mutex};
+        let mut m = TerminalManager::utf8(TerminalSize::new(24, 80));
+        let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let r = received.clone();
+        let _sub = m.events().on(move |e| {
+            if let TerminalEvent::PreeditChange(s) = e {
+                r.lock().unwrap().push(s.clone());
+            }
+        });
+        m.set_preedit("ab");
+        m.clear_preedit();
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got, vec!["ab".to_string(), "".to_string()]);
+    }
+
+    /// Task 11: 子行/列级脏追踪，dirty_spans 字段存在且语义正确
+    #[test]
+    fn test_col_level_dirty() {
+        let mut m = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // 初始帧
+        let _ = m.poll_frame(Instant::now());
+        // 直接调用 damage.mark_span_dirty 通过公共 API 不可达，
+        // 但我们可通过 set_preedit 触发 cursor 行整行脏（间接验证 dirty_spans 字段存在）
+        // 这里改为直接断言 dirty_spans 字段：
+        // 先写一些内容到 row 5
+        m.write(b"hello\n");
+        let frame = m.poll_frame(Instant::now()).expect("write triggers frame");
+        // dirty_spans 应非空，且每个 span 的 row 字段有效
+        assert!(!frame.dirty_spans.is_empty());
+        for span in &frame.dirty_spans {
+            // 整行脏时 col_start == 0
+            assert_eq!(span.col_start, 0);
+            assert!(span.col_end > 0);
+        }
     }
 }

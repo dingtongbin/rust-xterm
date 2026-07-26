@@ -1,0 +1,29 @@
+- [x] **彩色 Emoji**：`TextureAtlas` 默认 `bytes_per_pixel = 4`；`composite_glyph` 对 `is_color = true` 走 RGBA 直写路径；`rasterize_glyph` 用多 Source（ColorOutline + ColorBitmap + Outline）
+- [x] **彩色 Emoji 测试**：`test_color_emoji_rasterize_rgba` / `test_color_emoji_composite` / `test_ascii_still_alpha` 通过
+- [x] **连字**：`FontTree::shape_run` 使用 `swash::shape`；atlas 缓存键为 `(run_hash, bold, italic)`；`render_row` 按同属性 Cell run 整形绘制；`enable_ligatures` 配置开关
+- [x] **连字测试**：`test_ligature_shape_run` / `test_ligature_disabled` 通过
+- [x] **智能选词**：`select_word` 优先检测 URL（http/https/ftp/file/ssh）/ Unix 路径 / IPv4 / IPv6，匹配则扩展覆盖整个 token；不引入 regex/url 依赖
+- [x] **智能选词测试**：`test_select_word_url` / `test_select_word_unix_path` / `test_select_word_ipv4` / `test_select_word_plain` 通过
+- [x] **矩形块选**：`handle_selection_mouse` 读取 `mods.alt`，Alt+左键拖拽设 `rectangular = true`；`MouseState.alt_held` 字段就位
+- [x] **矩形块选测试**：`test_alt_drag_rectangular` / `test_no_alt_linear` 通过
+- [x] **选区一致性**：`resize` / `scrollback_scroll` 清选区并 emit `SelectionChange`；`set_selection` 入参 clamp 到 size
+- [x] **选区一致性测试**：`test_resize_clears_selection` / `test_set_selection_clamp` 通过
+- [x] **IME 预编辑**：`composition: Option<String>` + `set_preedit` / `commit_text` / `clear_preedit`；`poll_frame` 标 cursor 行脏；renderer 在 cursor 行渲染带下划线 composition；`PreeditChange` 事件
+- [x] **IME 测试**：`test_set_preedit_marks_dirty` / `test_commit_text_writes_pty` / `test_clear_preedit` 通过
+- [x] **Unicode grapheme**：引入 `unicode-segmentation = "1.12"`；`selection_text` / `select_word` 按 grapheme cluster 边界扩展
+- [x] **Unicode grapheme 测试**：`test_grapheme_zwj_selection`（family 👨‍👩‍👧）/ `test_grapheme_flag_selection`（🇨🇳）通过
+- [x] **全局字形缓存**：`GlobalAtlas`（`OnceLock<Arc<Mutex<TextureAtlas>>>`）；`Renderer::with_global_atlas` 共享；保持 `#![forbid(unsafe_code)]`
+- [x] **全局字形缓存测试**：`test_global_atlas_shared` 两 Renderer 共享命中通过
+- [x] **Sixel 解析**：`sixel.rs` 手写解析 DCS + RLE + 调色板 → RGBA；`manager.write` 分流 DCS；`render_image` blit 到 canvas
+- [x] **Sixel 测试**：`test_sixel_parse_simple` / `test_sixel_rle` 通过
+- [x] **iTerm2 inline image**：引入 `image = { version = "0.25", default-features = false, features = ["png","jpeg"] }`；`iterm2.rs` 解析 OSC 1337 + 手写 base64 + image crate 解码；OSC 1337 handler 注册
+- [x] **iTerm2 测试**：`test_iterm2_png_decode` 通过
+- [x] **子行/列级脏区**：`DamageTracker` 增加 `col_spans: BTreeMap<usize, Vec<(usize, usize)>>`；`DirtySpan { row, col_start, col_end }`；`render_frame` 按 span 切片
+- [x] **子行脏区测试**：`test_col_level_dirty` 通过
+- [x] **依赖最小化**：仅新增 `unicode-segmentation` + `image`（png+jpeg features）；不引入 regex/url/base64
+- [x] **MSRV 1.88**：所有新增依赖 ≤ 1.88；`cargo +1.88.0 build --all-targets` 通过
+- [x] **测试全绿**：`cargo +1.88.0 test --all-targets` 通过（含新增约 20 项测试）
+- [x] **Clippy 零告警**：`cargo +1.88.0 clippy --all-targets -- -D warnings` 通过
+- [x] **格式检查**：`cargo +1.88.0 fmt --all -- --check` 通过
+- [x] **依赖隔离**：`/workspace/Cargo.lock` 不含 GUI 框架（grep slint/iced/egui/eframe 无输出）；三个 demo 通过 path 引用自动获得新依赖，无需改 demo Cargo.toml
+- [x] **文档同步**：`FEATURES.md` 汇总表已实现 23→33 项（70%→100%）；`PROGRESS.md` 增加本轮交付；`README.md` Features 列表新增 IME/Sixel/iTerm2/ligature/color emoji/global atlas/sub-row dirty

@@ -17,7 +17,7 @@
 use rust_xterm_core::{
     input::{KeyInput, KeyMapping},
     mouse::{KeyMods, MouseAction, MouseButton},
-    CursorMeta, CursorShape, RustXtermCell,
+    CursorMeta, CursorShape,
 };
 use rust_xterm_host::{Event, EventLoop, EventLoopConfig, PtyBridge, PtyConfig};
 use rust_xterm_renderer::{Canvas, PixelFormat, Renderer, RendererConfig, RenderMetrics};
@@ -137,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         canvas_height: canvas_h,
         default_fg: rust_xterm_core::Color::WHITE,
         default_bg: rust_xterm_core::Color::BLACK,
+        enable_ligatures: true,
     };
     let mut renderer = Renderer::new(renderer_config);
     // 初始清屏
@@ -301,12 +302,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::FrameUpdate(frame) => {
                     if ctx.scroll_offset == 0 {
                         // 正常脏区渲染
-                        let dirty_rows: Vec<u32> =
-                            frame.dirty_cells.iter().map(|r| r.y as u32).collect();
-                        let cells_refs: Vec<&[RustXtermCell]> =
-                            frame.dirty_cells.iter().map(|r| r.cells.as_slice()).collect();
-                        if !dirty_rows.is_empty() {
-                            ctx.renderer.render_frame(&dirty_rows, &cells_refs);
+                        if !frame.dirty_spans.is_empty() {
+                            ctx.renderer.render_frame(&frame.dirty_spans);
                         }
                         // 画光标
                         if frame.cursor.visible {
@@ -330,10 +327,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .event_loop
                 .manager_ref()
                 .snapshot_scrolled(ctx.scroll_offset);
-            let cells: Vec<&[RustXtermCell]> =
-                snap.rows.iter().map(|r| r.as_slice()).collect();
-            let rows: Vec<u32> = (0..snap.rows.len() as u32).collect();
-            ctx.renderer.render_frame(&rows, &cells);
+            let spans: Vec<rust_xterm_core::DirtySpan> = snap
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(row, cells)| rust_xterm_core::DirtySpan {
+                    row,
+                    col_start: 0,
+                    col_end: cells.len(),
+                    cells: cells.clone(),
+                })
+                .collect();
+            if !spans.is_empty() {
+                ctx.renderer.render_frame(&spans);
+            }
         }
 
         // FPS
@@ -396,10 +403,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 强制全屏重绘
                 ctx.scroll_offset = 0;
                 let snap = ctx.event_loop.manager_ref().screen_snapshot();
-                let cells: Vec<&[RustXtermCell]> =
-                    snap.rows.iter().map(|r| r.as_slice()).collect();
-                let rows: Vec<u32> = (0..snap.rows.len() as u32).collect();
-                ctx.renderer.render_frame(&rows, &cells);
+                let spans: Vec<rust_xterm_core::DirtySpan> = snap
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(row, cells)| rust_xterm_core::DirtySpan {
+                        row,
+                        col_start: 0,
+                        col_end: cells.len(),
+                        cells: cells.clone(),
+                    })
+                    .collect();
+                if !spans.is_empty() {
+                    ctx.renderer.render_frame(&spans);
+                }
                 let frame = ctx.event_loop.manager_ref().cursor();
                 ctx.renderer.render_cursor(&CursorMeta {
                     x: frame.x,

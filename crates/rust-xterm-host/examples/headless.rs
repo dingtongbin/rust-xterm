@@ -22,14 +22,14 @@ fn main() {
     if let Some(frame) = mgr.poll_frame(Instant::now()) {
         println!("=== Frame update ===");
         println!("Dirty rects: {}", frame.dirty_rects.len());
-        println!("Dirty rows:  {}", frame.dirty_cells.len());
+        println!("Dirty spans: {}", frame.dirty_spans.len());
         println!("Cursor:      ({}, {})", frame.cursor.x, frame.cursor.y);
 
         // Print the dirty rows
-        for row in &frame.dirty_cells {
-            let text: String = row.cells.iter().map(|c| c.text.as_str()).collect();
+        for span in &frame.dirty_spans {
+            let text: String = span.cells.iter().map(|c| c.text.as_str()).collect();
             if !text.trim().is_empty() {
-                println!("  row {:>2}: {}", row.y, text);
+                println!("  row {:>2}: {}", span.row, text);
             }
         }
     }
