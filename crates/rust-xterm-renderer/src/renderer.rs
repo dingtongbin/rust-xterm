@@ -1067,7 +1067,7 @@ impl Renderer {
         let y = cursor.y as u32 * metrics.cell_height;
 
         match cursor.shape {
-            CursorShape::Block | CursorShape::Default => {
+            CursorShape::Block => {
                 // 块状光标：填充整个单元格
                 self.canvas.fill_rect(
                     x,
@@ -1080,8 +1080,8 @@ impl Renderer {
                     128, // 半透明
                 );
             }
-            CursorShape::Bar => {
-                // 竖线光标
+            CursorShape::Default | CursorShape::Bar => {
+                // 竖线光标（Default 与 Windows Terminal / xterm 默认一致）
                 self.canvas
                     .fill_rect(x, y, 2, metrics.cell_height, 255, 255, 255, 255);
             }
@@ -1480,6 +1480,57 @@ mod tests {
         };
         renderer.render_cursor(&cursor);
         // 不 panic 即通过
+    }
+
+    /// Task 9: CursorShape::Default 应渲染为竖线（Bar），而非块状（Block）
+    ///
+    /// 在干净画布（全 0）上渲染 `CursorShape::Default` 光标，断言：
+    /// - 前两列像素为不透明白色（Bar 路径填充 2px 宽，alpha=255）
+    /// - 第三列及 cell 末列保持背景色（未被 Bar 填充）
+    ///
+    /// 若 Default 错误映射到 Block，整个 cell 会被半透明白色 (255,255,255,128)
+    /// 填充，第三列与末列像素将变为 (255,255,255,128)，断言失败。
+    #[test]
+    fn test_default_cursor_renders_bar_not_block() {
+        let mut renderer = Renderer::new(RendererConfig::default());
+        // 画布初始为全 0（透明黑），无需 clear
+        let cursor = CursorMeta {
+            x: 0,
+            y: 0,
+            visible: true,
+            shape: CursorShape::Default,
+        };
+        renderer.render_cursor(&cursor);
+
+        let canvas = renderer.canvas();
+        // 前两列应为不透明白色（Bar 宽度 2px，alpha=255）
+        assert_eq!(
+            canvas.get_pixel(0, 0),
+            (255, 255, 255, 255),
+            "Default 光标首列应为不透明白色（Bar 路径）"
+        );
+        assert_eq!(
+            canvas.get_pixel(1, 0),
+            (255, 255, 255, 255),
+            "Default 光标第二列应为不透明白色（Bar 路径）"
+        );
+
+        // 第三列应保持背景色（Bar 宽度仅 2px，不填充此列）
+        // 若 Default 错误映射到 Block，此像素会变为 (255, 255, 255, 128)
+        assert_eq!(
+            canvas.get_pixel(2, 0),
+            (0, 0, 0, 0),
+            "Default 光标第三列应保持背景色（Bar 宽度仅 2px），\
+             若此断言失败说明 Default 被错误映射到 Block"
+        );
+
+        // cell 末列也应保持背景色（Bar 不填充整个 cell）
+        let cell_width = renderer.metrics().cell_width;
+        assert_eq!(
+            canvas.get_pixel(cell_width - 1, 0),
+            (0, 0, 0, 0),
+            "Default 光标 cell 末列应保持背景色（Bar 仅 2px 宽，不填充整个 cell）"
+        );
     }
 
     #[test]

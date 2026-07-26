@@ -48,7 +48,9 @@ export component App inherits Window {
                 width: 100%;
                 height: 100%;
                 source: terminal-image;
-                image-fit: fill;
+                // contain 而非 fill：避免非等比窗口下终端被拉伸变形
+                // （canvas 物理像素尺寸由 resize timer 保证与显示矩形 1:1）
+                image-fit: contain;
             }
 
             touch := TouchArea {

@@ -90,6 +90,14 @@ impl EventLoop {
         &self.manager
     }
 
+    /// 设置光标是否闪烁
+    ///
+    /// 委托 [`TerminalManager::set_cursor_blinking`]。
+    /// Demo 应在初始化后调用此方法启用闪烁。
+    pub fn set_cursor_blinking(&mut self, enabled: bool) {
+        self.manager.set_cursor_blinking(enabled);
+    }
+
     /// 执行一次事件循环 tick
     ///
     /// 应在 GUI 定时器中以 `config.poll_interval` 间隔调用。
