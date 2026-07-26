@@ -20,7 +20,7 @@ use rust_xterm_core::{
     CursorMeta, CursorShape,
 };
 use rust_xterm_host::{Event, EventLoop, EventLoopConfig, PtyBridge, PtyConfig};
-use rust_xterm_renderer::{Canvas, PixelFormat, Renderer, RendererConfig, RenderMetrics};
+use rust_xterm_renderer::{Canvas, PixelFormat, RenderMetrics, Renderer, RendererConfig};
 
 use slint::{
     CloseRequestResponse, Image as SlintImage, SharedPixelBuffer, SharedString, Timer, TimerMode,
@@ -56,6 +56,8 @@ struct AppCtx {
     last_mem_mb: f64,
     scroll_offset: usize,
     pty_alive: bool,
+    /// 当前键盘修饰键状态（由 key-pressed 回调维护，供 mouse 回调读取）
+    current_mods: KeyMods,
 }
 
 // -----------------------------------------------------------------------------
@@ -145,13 +147,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     renderer.clear();
 
     // ---- 3. 剪贴板 ----
-    let clipboard: ClipboardHandle = Arc::new(Mutex::new(
-        arboard::Clipboard::new().unwrap_or_else(|e| {
+    let clipboard: ClipboardHandle =
+        Arc::new(Mutex::new(arboard::Clipboard::new().unwrap_or_else(|e| {
             eprintln!("[slint-demo] clipboard init failed: {e:?}");
             // 无法用 arboard，用占位会 panic —— 降级为不复制
             std::process::exit(0)
-        }),
-    ));
+        })));
 
     // ---- 4. 创建 Slint App ----
     let app = App::new()?;
@@ -167,12 +168,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_mem_mb: 0.0,
         scroll_offset: 0,
         pty_alive,
+        current_mods: KeyMods::default(),
     }));
 
     // ---- 6. 键盘回调 ----
     let ctx_kb = Rc::clone(&ctx);
     app.on_key_pressed_cb(move |text, ctrl, alt, shift| {
         let mods = KeyMods { ctrl, alt, shift };
+        {
+            // 保存当前修饰键状态，供鼠标回调读取（矩形选区等）
+            let mut ctx = ctx_kb.borrow_mut();
+            ctx.current_mods = mods;
+        }
+        // Shift+PageUp/PageDown：scrollback 导航（Slint 1.6 TouchArea 无滚轮事件，
+        // 用键盘快捷键替代）
+        if mods.shift && !mods.ctrl && !mods.alt {
+            match text.as_str() {
+                "PageUp" | "PageDown" => {
+                    let mut ctx = ctx_kb.borrow_mut();
+                    let max = ctx.event_loop.manager_ref().max_scrollback();
+                    if text == "PageUp" {
+                        ctx.scroll_offset = (ctx.scroll_offset + 5).min(max.max(1));
+                    } else {
+                        ctx.scroll_offset = ctx.scroll_offset.saturating_sub(5);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         // 优先尝试映射具名键
         if let Some(key) = map_named_key(&text, &mods) {
             let mut ctx = ctx_kb.borrow_mut();
@@ -194,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = ctx.event_loop.send_input(&data);
             } else if mods.ctrl && bytes.len() == 1 {
                 let c = bytes[0];
-                if (b'a'..=b'z').contains(&c) || (b'A'..=b'Z').contains(&c) {
+                if c.is_ascii_lowercase() || c.is_ascii_uppercase() {
                     // Ctrl+字母 → 用 KeyMapping 保证一致编码
                     let key = KeyInput::Char(c.to_ascii_lowercase() as char);
                     let data = KeyMapping::encode_key(key, mods, false);
@@ -249,9 +273,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let need_paste = mouse_btn == MouseButton::Middle && action == MouseAction::Press;
 
         // 转发：manager 内部自动判定鼠标跟踪模式 vs 选区模式
+        // 使用 current_mods（由 key-pressed 回调维护）而非 default，
+        // 以支持 Alt+拖拽矩形选区
+        let mods = ctx.current_mods;
         ctx.event_loop
             .manager()
-            .mouse_event(col, row, action, mouse_btn, KeyMods::default());
+            .mouse_event(col, row, action, mouse_btn, mods);
 
         // 释放左键后：若选区非空，复制到剪贴板
         if need_copy {
@@ -265,13 +292,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // 中键粘贴
+        // 中键粘贴（支持 bracketed paste）
         if need_paste {
             if let Ok(mut cb) = cb_clip.lock() {
                 if let Ok(text) = cb.get_text() {
                     if !text.is_empty() {
-                        let bytes = text.as_bytes();
-                        let _ = ctx.event_loop.send_input(bytes);
+                        let bracketed = ctx.event_loop.manager_ref().is_bracketed_paste_enabled();
+                        if bracketed {
+                            let _ = ctx.event_loop.send_input(b"\x1b[200~");
+                            let _ = ctx.event_loop.send_input(text.as_bytes());
+                            let _ = ctx.event_loop.send_input(b"\x1b[201~");
+                        } else {
+                            let _ = ctx.event_loop.send_input(text.as_bytes());
+                        }
                     }
                 }
             }
@@ -295,91 +328,96 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx_tick = Rc::clone(&ctx);
     let app_weak_tick = app_weak.clone();
     let timer = Timer::default();
-    timer.start(TimerMode::Repeated, Duration::from_millis(TICK_INTERVAL_MS), move || {
-        let mut ctx = ctx_tick.borrow_mut();
-        // EventLoop::tick
-        if let Some(event) = ctx.event_loop.tick() {
-            match event {
-                Event::FrameUpdate(frame) => {
-                    if ctx.scroll_offset == 0 {
-                        // 正常脏区渲染
-                        if !frame.dirty_spans.is_empty() {
-                            ctx.renderer.render_frame(&frame.dirty_spans);
+    timer.start(
+        TimerMode::Repeated,
+        Duration::from_millis(TICK_INTERVAL_MS),
+        move || {
+            let mut ctx = ctx_tick.borrow_mut();
+            // EventLoop::tick
+            if let Some(event) = ctx.event_loop.tick() {
+                match event {
+                    Event::FrameUpdate(frame) => {
+                        if ctx.scroll_offset == 0 {
+                            // 正常脏区渲染
+                            if !frame.dirty_spans.is_empty() {
+                                ctx.renderer.render_frame(&frame.dirty_spans);
+                            }
+                            // 画光标
+                            if frame.cursor.visible {
+                                ctx.renderer.render_cursor(&frame.cursor);
+                            }
                         }
-                        // 画光标
-                        if frame.cursor.visible {
-                            ctx.renderer.render_cursor(&frame.cursor);
-                        }
+                        // scroll_offset > 0 时跳过 live 渲染，保持 scrollback 视图
                     }
-                    // scroll_offset > 0 时跳过 live 渲染，保持 scrollback 视图
-                }
-                Event::Closed => {
-                    ctx.pty_alive = false;
-                    if let Some(app) = app_weak_tick.upgrade() {
-                        app.set_mem_text("PTY closed".into());
+                    Event::Closed => {
+                        ctx.pty_alive = false;
+                        if let Some(app) = app_weak_tick.upgrade() {
+                            app.set_mem_text("PTY closed".into());
+                        }
                     }
                 }
             }
-        }
 
-        // 若处于 scrollback 视图，全屏重绘
-        if ctx.scroll_offset > 0 {
-            let snap = ctx
-                .event_loop
-                .manager_ref()
-                .snapshot_scrolled(ctx.scroll_offset);
-            let spans: Vec<rust_xterm_core::DirtySpan> = snap
-                .rows
-                .iter()
-                .enumerate()
-                .map(|(row, cells)| rust_xterm_core::DirtySpan {
-                    row,
-                    col_start: 0,
-                    col_end: cells.len(),
-                    cells: cells.clone(),
-                })
-                .collect();
-            if !spans.is_empty() {
-                ctx.renderer.render_frame(&spans);
+            // 若处于 scrollback 视图，全屏重绘
+            if ctx.scroll_offset > 0 {
+                let snap = ctx
+                    .event_loop
+                    .manager_ref()
+                    .snapshot_scrolled(ctx.scroll_offset);
+                let spans: Vec<rust_xterm_core::DirtySpan> = snap
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(row, cells)| rust_xterm_core::DirtySpan {
+                        row,
+                        col_start: 0,
+                        col_end: cells.len(),
+                        cells: cells.clone(),
+                    })
+                    .collect();
+                if !spans.is_empty() {
+                    ctx.renderer.render_frame(&spans);
+                }
             }
-        }
 
-        // FPS
-        let fps = ctx.fps_tracker.tick();
+            // FPS
+            let fps = ctx.fps_tracker.tick();
 
-        // 内存刷新
-        let now = Instant::now();
-        if now.duration_since(ctx.last_mem_refresh).as_millis() > MEM_REFRESH_MS as u128 {
-            ctx.sys.refresh_memory();
-            let used = ctx.sys.used_memory();
-            // 兼容不同 sysinfo 版本：used_memory 返回字节或 KB
-            let mb = (used as f64) / (1024.0 * 1024.0);
-            ctx.last_mem_mb = mb;
-            ctx.last_mem_refresh = now;
-        }
+            // 内存刷新
+            let now = Instant::now();
+            if now.duration_since(ctx.last_mem_refresh).as_millis() > MEM_REFRESH_MS as u128 {
+                ctx.sys.refresh_memory();
+                let used = ctx.sys.used_memory();
+                // 兼容不同 sysinfo 版本：used_memory 返回字节或 KB
+                let mb = (used as f64) / (1024.0 * 1024.0);
+                ctx.last_mem_mb = mb;
+                ctx.last_mem_refresh = now;
+            }
 
-        // 上传像素到 Slint Image
-        let canvas = ctx.renderer.canvas();
-        let buffer = canvas.buffer();
-        let w = canvas.width();
-        let h = canvas.height();
-        let pixel_buffer = SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(buffer, w, h);
-        let image = SlintImage::from_rgba8(pixel_buffer);
+            // 上传像素到 Slint Image
+            let canvas = ctx.renderer.canvas();
+            let buffer = canvas.buffer();
+            let w = canvas.width();
+            let h = canvas.height();
+            let pixel_buffer =
+                SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(buffer, w, h);
+            let image = SlintImage::from_rgba8(pixel_buffer);
 
-        if let Some(app) = app_weak_tick.upgrade() {
-            app.set_terminal_image(image);
-            app.set_fps_text(SharedString::from(format!("FPS: {fps:>5.1}")));
-            app.set_mem_text(SharedString::from(format!(
-                "Mem: {:.1} MB",
-                ctx.last_mem_mb
-            )));
-            app.set_scroll_text(SharedString::from(format!(
-                "Scroll: {}{}",
-                ctx.scroll_offset,
-                if ctx.pty_alive { "" } else { " [PTY closed]" }
-            )));
-        }
-    });
+            if let Some(app) = app_weak_tick.upgrade() {
+                app.set_terminal_image(image);
+                app.set_fps_text(SharedString::from(format!("FPS: {fps:>5.1}")));
+                app.set_mem_text(SharedString::from(format!(
+                    "Mem: {:.1} MB",
+                    ctx.last_mem_mb
+                )));
+                app.set_scroll_text(SharedString::from(format!(
+                    "Scroll: {}{}",
+                    ctx.scroll_offset,
+                    if ctx.pty_alive { "" } else { " [PTY closed]" }
+                )));
+            }
+        },
+    );
 
     // ---- 11. resize 检测定时器（200ms 间隔）----
     let ctx_resize = Rc::clone(&ctx);
@@ -387,10 +425,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_size: (u32, u32) = (canvas_w, canvas_h + STATUS_BAR_H);
     let resize_timer = Timer::default();
     resize_timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
-        let Some(app) = app_weak_resize.upgrade() else { return };
+        let Some(app) = app_weak_resize.upgrade() else {
+            return;
+        };
         let window_size = app.window().size();
-        let w = window_size.width as u32;
-        let h = window_size.height as u32;
+        let w = window_size.width;
+        let h = window_size.height;
         if (w, h) != last_size && w > 0 && h > STATUS_BAR_H {
             last_size = (w, h);
             let avail_h = h - STATUS_BAR_H;
@@ -473,7 +513,9 @@ fn map_named_key(text: &str, _mods: &KeyMods) -> Option<KeyInput> {
 fn is_nav_key(text: &str) -> bool {
     matches!(
         text,
-        "Up" | "Down" | "Left" | "Right"
+        "Up" | "Down"
+            | "Left"
+            | "Right"
             | "ArrowUp"
             | "ArrowDown"
             | "ArrowLeft"
