@@ -1,0 +1,58 @@
+# =============================================================================
+# russh-slint-demo: 独立的 Slint + russh SSH 终端 demo
+# =============================================================================
+# 依赖隔离硬约束（与 slint-demo 一致）：
+#   - 不加入 /workspace/Cargo.toml 的 members
+#   - 独立 Cargo.lock
+#   - GUI 依赖 slint + russh 只写在此处，不用 .workspace = true
+#   - 引用 rust-xterm 库 crate 用相对 path
+# =============================================================================
+
+[package]
+name = "russh-slint-demo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[lib]
+name = "russh_slint_demo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "russh-slint-demo"
+path = "src/main.rs"
+
+[build-dependencies]
+slint-build = "=1.6.0"
+
+[dependencies]
+# slint 必须用 `=` 精确锁定 1.6.0，否则 caret 会拉最新 1.x
+slint = "=1.6.0"
+sysinfo = "0.30"
+arboard = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# russh: 纯 Rust SSH 客户端/服务端实现，async（tokio）
+# russh 0.50 已通过 `russh::keys::*` 重导出 ssh_key 类型，无需单独依赖 russh-keys
+russh = "0.50"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "io-util", "net"] }
+# 本地 crate
+rust-xterm-core = { path = "../../crates/rust-xterm-core" }
+rust-xterm-renderer = { path = "../../crates/rust-xterm-renderer" }
+# 注意：不引用 rust-xterm-host，因为本 demo 用 SSH channel 替代本地 PTY，
+# EventLoop 由 demo 内部自定义（直接操作 TerminalManager）。
+
+[dev-dependencies]
+# 测试用：mock SSH server
+tempfile = "3"
+# mock SSH server 需要 Ed25519 key 生成
+rand_core = "0.6.4"
+
+# -----------------------------------------------------------------------------
+# 独立工作区声明：使本 crate 成为自身的工作区根，
+# 从而与 /workspace 的 workspace 完全解耦，拥有独立 Cargo.lock。
+# -----------------------------------------------------------------------------
+[workspace]
