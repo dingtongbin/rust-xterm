@@ -40,11 +40,11 @@ slint::include_modules!();
 // -----------------------------------------------------------------------------
 // 常量
 // -----------------------------------------------------------------------------
-pub(crate) const CELL_W: u32 = 8;
-pub(crate) const CELL_H: u32 = 16;
+pub(crate) const CELL_W: u32 = 9;
+pub(crate) const CELL_H: u32 = 19;
 pub(crate) const STATUS_BAR_H: u32 = 22;
-const INITIAL_COLS: usize = 80;
-const INITIAL_ROWS: usize = 24;
+const INITIAL_COLS: usize = 100;
+const INITIAL_ROWS: usize = 30;
 const TICK_INTERVAL_MS: u64 = 16;
 pub(crate) const MEM_REFRESH_MS: u64 = 500;
 const DEFAULT_CONFIG_PATH: &str = "config.json";
@@ -104,17 +104,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics: RenderMetrics {
             cell_width: CELL_W,
             cell_height: CELL_H,
-            baseline: 13,
+            baseline: CELL_H - 3,
             dpi: 96.0,
-            font_size: 16.0,
+            font_size: 18.0,
         },
-        atlas_width: 1024,
-        atlas_height: 1024,
+        atlas_width: 512,
+        atlas_height: 512,
         canvas_width: canvas_w,
         canvas_height: canvas_h,
         default_fg,
         default_bg,
         enable_ligatures: true,
+        scale_factor: 1.0,
     };
     let mut renderer = Renderer::new(renderer_config);
     renderer.clear();
@@ -139,31 +140,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 7. 键盘回调 ----
     let ctx_kb = Rc::clone(&ctx);
+    let kb_clip = Arc::clone(&clipboard);
     app.on_key_pressed_cb(move |text, ctrl, alt, shift| {
-        input::handle_key_pressed(&ctx_kb, &text, ctrl, alt, shift);
+        input::handle_key_pressed(&ctx_kb, &kb_clip, &text, ctrl, alt, shift);
     });
 
     // ---- 8. 鼠标回调 ----
     let ctx_mouse = Rc::clone(&ctx);
     let cb_clip = Arc::clone(&clipboard);
+    let app_weak_mouse = app_weak.clone();
     app.on_pointer_event_cb(move |x, y, kind, button| {
-        mouse::handle_pointer_event(&ctx_mouse, &cb_clip, x, y, kind, button);
+        // HiDPI：获取窗口 scale_factor 传给 mouse 处理器（Task 4.2）
+        let scale = app_weak_mouse
+            .upgrade()
+            .map(|a| a.window().scale_factor())
+            .unwrap_or(1.0);
+        mouse::handle_pointer_event(&ctx_mouse, &cb_clip, x, y, kind, button, scale);
     });
 
     // ---- 9. 滚轮回调 ----
     let ctx_wheel = Rc::clone(&ctx);
     app.on_scroll_cb(move |delta_y| {
         let mut ctx = ctx_wheel.borrow_mut();
-        let max = ctx.manager.max_scrollback();
         let pixels_per_row = CELL_H as f32;
-        let delta_rows = delta_y / pixels_per_row;
-        ctx.scroll_offset = if delta_y > 0.0 {
-            (ctx.scroll_offset as f32 + delta_rows).round() as usize
-        } else {
-            ctx.scroll_offset
-                .saturating_sub((-delta_rows).round() as usize)
+        let delta_rows = (delta_y.abs() / pixels_per_row).round() as u32;
+
+        // 远端程序启用鼠标跟踪时，转发滚轮事件给 manager
+        if ctx.manager.is_mouse_grabbed() && delta_rows > 0 {
+            use rust_xterm_core::{KeyMods, MouseAction, MouseButton};
+            let (action, btn) = if delta_y > 0.0 {
+                (MouseAction::WheelUp(delta_rows), MouseButton::Left)
+            } else {
+                (MouseAction::WheelDown(delta_rows), MouseButton::Left)
+            };
+            // 鼠标位置：用最后一次 pointer-event 的位置（如果没有，用 0,0）
+            let (col, row) = ctx.last_mouse_pos.unwrap_or((0, 0));
+            ctx.manager
+                .mouse_event(col, row, action, btn, KeyMods::default());
+            // 通过 drain_output 取出 WezTerm 编码的鼠标报告字节，发给 SSH channel
+            let out = ctx.manager.drain_output();
+            if !out.is_empty() {
+                if let Some(bridge) = ctx.bridge.as_ref() {
+                    let _ = bridge.send_input(out);
+                }
+            }
+            return; // 鼠标跟踪模式下不更新 scroll_offset
         }
-        .min(max);
+
+        // 非鼠标跟踪模式：保持 scrollback 行为
+        let max = ctx.manager.max_scrollback();
+        ctx.scroll_offset = if delta_y > 0.0 {
+            (ctx.scroll_offset + delta_rows as usize).min(max)
+        } else {
+            ctx.scroll_offset.saturating_sub(delta_rows as usize)
+        };
+    });
+
+    // ---- 9.5. ScrollBar 拖拽/点击 → ctx.scroll_offset（双向绑定） ----
+    // Slint 1.6 不为 in-out property 生成 on_<prop>_changed，改用自定义
+    // scroll-to(float) 回调（ScrollBar TouchArea 触发）。
+    // 使用 try_borrow_mut：render::tick 持有 borrow 时安全跳过（值已在 tick 中同步）。
+    let ctx_scroll = Rc::clone(&ctx);
+    app.on_scroll_to(move |ratio_offset| {
+        if let Ok(mut ctx) = ctx_scroll.try_borrow_mut() {
+            let max = ctx.manager.max_scrollback();
+            let new_offset = (ratio_offset.max(0.0) as usize).min(max);
+            ctx.scroll_offset = new_offset;
+        }
     });
 
     // ---- 10. 窗口关闭请求 ----
@@ -177,7 +220,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CloseRequestResponse::HideWindow
     });
 
-    // ---- 11. 定时器：驱动 render::tick（drain SSH + poll_frame + 渲染） ----
+    // ---- 11. 定时器：驱动 render::tick（drain SSH + poll_frame + 渲染 + resize 检测） ----
+    // resize 检测已合并到 render::tick 中（每 16ms 检测窗口 size 变化），无需独立 200ms 定时器。
     let ctx_tick = Rc::clone(&ctx);
     let app_weak_tick = app_weak.clone();
     let timer = Timer::default();
@@ -189,21 +233,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    // ---- 12. resize 检测定时器（200ms 间隔） ----
-    let ctx_resize = Rc::clone(&ctx);
-    let app_weak_resize = app_weak.clone();
-    let mut last_size: (u32, u32) = (canvas_w, canvas_h + STATUS_BAR_H);
-    let resize_timer = Timer::default();
-    resize_timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
-        let Some(app) = app_weak_resize.upgrade() else {
-            return;
-        };
-        resize::handle_resize(&ctx_resize, &app, &mut last_size);
-    });
-
-    // ---- 13. 运行 ----
-    // 必须用真实绑定持有 Timer，不能用 `let _ = ...`，否则元组在 let 语句结束时立即 drop
-    let _timer_holders = (timer, resize_timer);
+    // ---- 12. 运行 ----
+    // 必须用真实绑定持有 Timer，不能用 `let _ = ...`，否则在 let 语句结束时立即 drop
+    let _timer_holders = (timer,);
     app.run()?;
     Ok(())
 }

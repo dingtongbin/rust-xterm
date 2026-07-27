@@ -5,13 +5,14 @@
 //! - 本 demo 调用 `SshBridge::send_input(bytes)` 发送到远端 SSH channel
 //! - 本地 TerminalManager **不**做本地回显：远端 shell 负责回显（如 bash 默认 echo）
 
-use crate::app_ctx::AppCtx;
+use crate::app_ctx::{AppCtx, ClipboardHandle};
 use rust_xterm_core::input::{KeyInput, KeyMapping};
 use rust_xterm_core::mouse::KeyMods;
 use std::cell::RefCell;
 
 pub(crate) fn handle_key_pressed(
     ctx: &RefCell<AppCtx>,
+    clipboard: &ClipboardHandle,
     text: &str,
     ctrl: bool,
     alt: bool,
@@ -22,6 +23,35 @@ pub(crate) fn handle_key_pressed(
         // 保存当前修饰键状态，供鼠标回调读取（矩形选区等）
         let mut ctx = ctx.borrow_mut();
         ctx.current_mods = mods;
+    }
+    // Ctrl+Shift+V: 从系统剪贴板粘贴
+    if mods.ctrl && mods.shift && (text == "v" || text == "V") {
+        // 先获取剪贴板文本（不持有 ctx 借用，避免与后续 borrow 冲突）
+        let paste_text_opt: Option<String> = {
+            if let Ok(mut cb) = clipboard.lock() {
+                cb.get_text().ok().filter(|t| !t.is_empty())
+            } else {
+                None
+            }
+        };
+        if let Some(paste_text) = paste_text_opt {
+            {
+                let ctx = ctx.borrow();
+                let bracketed = ctx.manager.is_bracketed_paste_enabled();
+                if let Some(bridge) = ctx.bridge.as_ref() {
+                    if bracketed {
+                        let _ = bridge.send_input(b"\x1b[200~".to_vec());
+                        let _ = bridge.send_input(paste_text.as_bytes().to_vec());
+                        let _ = bridge.send_input(b"\x1b[201~".to_vec());
+                    } else {
+                        let _ = bridge.send_input(paste_text.as_bytes().to_vec());
+                    }
+                }
+            } // 释放不可变借用
+              // 重置 scrollback（需要可变借用）
+            ctx.borrow_mut().scroll_offset = 0;
+        }
+        return;
     }
     // Shift+PageUp/PageDown：scrollback 导航
     if mods.shift && !mods.ctrl && !mods.alt {
@@ -41,7 +71,8 @@ pub(crate) fn handle_key_pressed(
     }
     // 优先尝试映射具名键
     if let Some(key) = map_named_key(text) {
-        let data = KeyMapping::encode_key(key, mods, false);
+        let app_cursor = ctx.borrow().manager.app_cursor_mode();
+        let data = KeyMapping::encode_key(key, mods, app_cursor);
         let mut ctx = ctx.borrow_mut();
         if let Some(bridge) = ctx.bridge.as_ref() {
             let _ = bridge.send_input(data);
@@ -71,6 +102,19 @@ pub(crate) fn handle_key_pressed(
                 let data = KeyMapping::encode_key(key, mods, false);
                 if let Some(bridge) = ctx.bridge.as_ref() {
                     let _ = bridge.send_input(data);
+                }
+            } else if (0x40..=0x5F).contains(&c) {
+                // Ctrl+非字母 ASCII 可打印字符（@ [ \ ] ^ _ 等）→ (c & 0x1f)
+                // C-@ (0x40→0x00 NUL)、C-[ (0x5B→0x1B ESC)、C-\ (0x5C→0x1C FS)、
+                // C-] (0x5D→0x1D GS)、C-^ (0x5E→0x1E RS)、C-_ (0x5F→0x1F US)
+                let ctrl_byte = c & 0x1f;
+                let mut out = Vec::with_capacity(2);
+                if mods.alt {
+                    out.push(0x1b);
+                }
+                out.push(ctrl_byte);
+                if let Some(bridge) = ctx.bridge.as_ref() {
+                    let _ = bridge.send_input(out);
                 }
             } else if let Some(bridge) = ctx.bridge.as_ref() {
                 let _ = bridge.send_input(bytes.to_vec());

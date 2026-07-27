@@ -32,7 +32,7 @@ pub struct RustXtermConfig {
 impl Default for RustXtermConfig {
     fn default() -> Self {
         Self {
-            scrollback: 3500,
+            scrollback: 1000,
             palette: ColorPalette::default(),
             generation: 0,
         }
@@ -107,7 +107,7 @@ impl RustXtermConfigBuilder {
     /// 构建配置
     pub fn build(self) -> RustXtermConfig {
         RustXtermConfig {
-            scrollback: self.scrollback.unwrap_or(3500),
+            scrollback: self.scrollback.unwrap_or(1000),
             palette: self.palette.unwrap_or_default(),
             generation: 0,
         }

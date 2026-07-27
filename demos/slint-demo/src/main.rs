@@ -35,8 +35,8 @@ slint::include_modules!();
 // -----------------------------------------------------------------------------
 // 常量
 // -----------------------------------------------------------------------------
-pub(crate) const CELL_W: u32 = 8;
-pub(crate) const CELL_H: u32 = 16;
+pub(crate) const CELL_W: u32 = 9;
+pub(crate) const CELL_H: u32 = 19;
 pub(crate) const STATUS_BAR_H: u32 = 22;
 const INITIAL_COLS: usize = 80;
 const INITIAL_ROWS: usize = 24;
@@ -98,15 +98,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             baseline: 13,
             dpi: 96.0,
             // font_size 与 cell_height 对齐：消除字形在 cell 内的垂直留白导致的模糊
-            font_size: 16.0,
+            font_size: 18.0,
         },
-        atlas_width: 1024,
-        atlas_height: 1024,
+        atlas_width: 512,
+        atlas_height: 512,
         canvas_width: canvas_w,
         canvas_height: canvas_h,
         default_fg,
         default_bg,
         enable_ligatures: true,
+        scale_factor: 1.0,
     };
     let mut renderer = Renderer::new(renderer_config);
     // 初始清屏
@@ -140,14 +141,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TerminalManager.mouse_event 内部已实现：
     //   - 鼠标跟踪模式（is_mouse_grabbed）下转发给 WezTerm 并生成报告
     //   - 非跟踪模式下：单击拖拽选区 / 双击选词 / 三击选行 / 释放触发 SelectionReady
+    //   - Shift bypass：按住 Shift 时即使鼠标跟踪启用也走本地选区
     // 本 demo 仅负责：
     //   - 转发 GUI 事件给 mouse_event
     //   - Release(Left) 时读取 selection_text 复制到剪贴板
     //   - Press(Middle) 时从剪贴板粘贴
     let ctx_mouse = Rc::clone(&ctx);
     let cb_clip = Arc::clone(&clipboard);
+    let app_weak_mouse = app_weak.clone();
     app.on_pointer_event_cb(move |x, y, kind, button| {
-        mouse::handle_pointer_event(&ctx_mouse, &cb_clip, x, y, kind, button);
+        // HiDPI：获取窗口 scale_factor 传给 mouse 处理器
+        let scale = app_weak_mouse
+            .upgrade()
+            .map(|a| a.window().scale_factor())
+            .unwrap_or(1.0);
+        mouse::handle_pointer_event(&ctx_mouse, &cb_clip, x, y, kind, button, scale);
     });
 
     // ---- 8. 滚轮 scrollback 回调 ----
@@ -179,7 +187,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CloseRequestResponse::HideWindow
     });
 
-    // ---- 10. 定时器：驱动 EventLoop::tick + 渲染 + FPS + 内存 ----
+    // ---- 10. 定时器：驱动 render::tick（EventLoop::tick + 渲染 + resize 检测） ----
+    // resize 检测已合并到 render::tick 中（每 16ms 检测窗口 size 变化），无需独立 200ms 定时器。
     let ctx_tick = Rc::clone(&ctx);
     let app_weak_tick = app_weak.clone();
     let timer = Timer::default();
@@ -191,23 +200,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    // ---- 11. resize 检测定时器（200ms 间隔）----
-    let ctx_resize = Rc::clone(&ctx);
-    let app_weak_resize = app_weak.clone();
-    let mut last_size: (u32, u32) = (canvas_w, canvas_h + STATUS_BAR_H);
-    let resize_timer = Timer::default();
-    resize_timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
-        let Some(app) = app_weak_resize.upgrade() else {
-            return;
-        };
-        resize::handle_resize(&ctx_resize, &app, &mut last_size);
-    });
-
-    // ---- 12. 运行 ----
-    // 注意：必须用真实绑定持有 Timer，不能用 `let _ = ...`！
+    // ---- 11. 运行 ----
+    // 必须用真实绑定持有 Timer，不能用 `let _ = ...`！
     // `_` 是通配模式不绑定值，元组会在 let 语句结束时立即 drop，
-    // 导致两个定时器被销毁、回调永不触发——表现为窗口黑屏 + 状态栏卡在 "--"。
-    let _timer_holders = (timer, resize_timer);
+    // 导致定时器被销毁、回调永不触发——表现为窗口黑屏 + 状态栏卡在 "--"。
+    let _timer_holders = (timer,);
     app.run()?;
     Ok(())
 }

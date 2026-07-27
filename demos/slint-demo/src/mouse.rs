@@ -1,4 +1,8 @@
 //! 鼠标事件处理：pointer-event 回调主体
+//!
+//! HiDPI 修正：像素→列换算预留 `scale` 参数（与 russh-slint-demo 一致）。
+//! Slint pointer-event 的 mouse-x/mouse-y 是逻辑像素，CELL_W/CELL_H 也是逻辑像素，
+//! 直接相除即得列/行号；scale 参数留作未来 Slint 改为物理像素坐标时的扩展点。
 use crate::app_ctx::{AppCtx, ClipboardHandle};
 use crate::{CELL_H, CELL_W};
 use rust_xterm_core::mouse::{MouseAction, MouseButton};
@@ -11,8 +15,13 @@ pub(crate) fn handle_pointer_event(
     y: f32,
     kind: i32,
     button: i32,
+    scale: f32,
 ) {
     let mut ctx = ctx.borrow_mut();
+    // HiDPI 坐标换算：Slint pointer-event 的 mouse-x/mouse-y 是逻辑像素，
+    // CELL_W/CELL_H 也是逻辑像素，直接相除即得列/行号。
+    // scale 参数预留（若未来 Slint 改为物理像素坐标，需改用 CELL_W * scale）。
+    let _ = scale;
     let col = (x as u32 / CELL_W) as usize;
     let row = (y as u32 / CELL_H) as usize;
     let cols = ctx.event_loop.manager_ref().size().cols;
