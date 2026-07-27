@@ -50,6 +50,19 @@ pub struct WezTermCore {
     /// 未暴露查询 API，故在此镜像一份供 [`Self::scroll_region`] 使用。
     /// 在 [`Self::advance_bytes`] 中扫描 `\x1b[<top>;<bottom>r` 维护。
     scroll_region: Option<(usize, usize)>,
+    /// Application Cursor Keys 模式（DECSET 1）是否启用
+    ///
+    /// WezTerm 内部以私有字段 `application_cursor_keys` 维护，
+    /// 未暴露查询 API，故在此镜像一份供 [`Self::app_cursor_mode`] 使用。
+    /// 在 [`Self::advance_bytes`] 中扫描 `\x1b[?1h` / `\x1b[?1l` 维护。
+    app_cursor: bool,
+    /// Alt screen 切换标志（DECSET/DECRST 47/1047/1049）
+    ///
+    /// WezTerm 内部在收到这些序列时会切换 primary/alternate buffer，
+    /// 但不向外暴露"全屏脏"信号，导致上层 demo 不重绘 alt screen 残留画面。
+    /// 在 [`Self::advance_bytes`] 中扫描这些序列时置为 true，
+    /// 由 [`Self::take_alt_screen_switch`] 消费式检查后触发 `mark_all_dirty`。
+    alt_screen_switch: bool,
 }
 
 impl WezTermCore {
@@ -84,6 +97,8 @@ impl WezTermCore {
             output_buffer,
             focus_reporting_enabled: false,
             scroll_region: None,
+            app_cursor: false,
+            alt_screen_switch: false,
         }
     }
 
@@ -129,9 +144,11 @@ impl WezTermCore {
     /// WezTerm 内部解析 ANSI 转义序列，更新 Grid。
     /// 此方法立即返回，不触发渲染。
     ///
-    /// 同时镜像扫描焦点报告（DECSET 1004）与滚动区域（DECSTBM）序列，
-    /// 维护 [`Self::focus_reporting_enabled`] 与 [`Self::scroll_region`] 状态，
-    /// 因为 WezTerm 未公开这两个字段的查询 API。
+    /// 同时镜像扫描焦点报告（DECSET 1004）、滚动区域（DECSTBM）
+    /// 与 application cursor keys（DECSET 1）序列，
+    /// 维护 [`Self::focus_reporting_enabled`]、[`Self::scroll_region`]
+    /// 与 [`Self::app_cursor`] 状态，
+    /// 因为 WezTerm 未公开这三个字段的查询 API。
     pub fn advance_bytes(&mut self, bytes: &str) {
         // 先扫描镜像状态，再喂入 WezTerm（WezTerm 也会处理这些序列，互不干扰）
         self.scan_csi_state(bytes.as_bytes());
@@ -160,6 +177,32 @@ impl WezTermCore {
         self.focus_reporting_enabled
     }
 
+    /// 是否启用了 Application Cursor Keys 模式（DECSET 1）
+    ///
+    /// 当应用发送 `\x1b[?1h` 时启用，`\x1b[?1l` 时禁用。
+    /// 启用后方向键发送 `\x1bOA`/`\x1bOB`/`\x1bOC`/`\x1bOD`（SS3），
+    /// 否则发送 `\x1b[A`/`\x1b[B`/`\x1b[C`/`\x1b[D`（CSI）。
+    ///
+    /// WezTerm 内部以私有字段 `application_cursor_keys` 维护此状态，
+    /// 未暴露查询 API，故由 [`Self::advance_bytes`] 在数据流中
+    /// 扫描 DECSET 1 序列维护本地镜像。
+    pub fn app_cursor_mode(&self) -> bool {
+        self.app_cursor
+    }
+
+    /// 消费式检查 alt screen 切换标志
+    ///
+    /// 在 [`crate::TerminalManager::write`] 末尾由 TerminalManager 调用，
+    /// 若返回 true 则 mark_all_dirty，确保 alt screen 进入/退出后全屏重绘，
+    /// 避免 htop 等程序退出后残留画面永久留在屏幕上。
+    ///
+    /// 返回 true 后会自动重置标志，下次调用恢复为 false 直到下一次 alt screen 切换。
+    pub fn take_alt_screen_switch(&mut self) -> bool {
+        let v = self.alt_screen_switch;
+        self.alt_screen_switch = false;
+        v
+    }
+
     /// 通知终端焦点状态变化
     ///
     /// 若启用了焦点报告模式（DECSET 1004），WezTerm 会向输出缓冲写入
@@ -180,11 +223,14 @@ impl WezTermCore {
         self.scroll_region
     }
 
-    /// 扫描 CSI 序列以镜像维护焦点报告与滚动区域状态
+    /// 扫描 CSI 序列以镜像维护焦点报告、滚动区域与 application cursor keys 状态
     ///
-    /// 仅识别两类序列：
-    /// - `\x1b[?1004h` / `\x1b[?1004l`：DECSET/DECRST 1004
+    /// 识别以下序列：
+    /// - `\x1b[?1004h` / `\x1b[?1004l`：DECSET/DECRST 1004（焦点报告）
+    /// - `\x1b[?1h` / `\x1b[?1l`：DECSET/DECRST 1（application cursor keys）
     /// - `\x1b[<top>;<bottom>r`：DECSTBM（空参数表示重置为全屏）
+    /// - `\x1b[?47h` / `\x1b[?47l`、`\x1b[?1047h` / `\x1b[?1047l`、
+    ///   `\x1b[?1049h` / `\x1b[?1049l`：DECSET/DECRST 47/1047/1049（alt screen 切换）
     ///
     /// 此扫描不消耗输入（WezTerm 仍会正常处理这些序列），
     /// 仅用于维护本地镜像状态以支持查询 API。
@@ -219,8 +265,14 @@ impl WezTermCore {
                         // DECSET/DECRST：final byte 'h' 或 'l'
                         if final_byte == b'h' || final_byte == b'l' {
                             if let Some(code) = parse_first_uint(params) {
-                                if code == 1004 {
-                                    self.focus_reporting_enabled = final_byte == b'h';
+                                match code {
+                                    1 => self.app_cursor = final_byte == b'h',
+                                    1004 => self.focus_reporting_enabled = final_byte == b'h',
+                                    // Alt screen 切换：进入或退出 alternate buffer。
+                                    // 任一序列被检测到时置位 alt_screen_switch，
+                                    // 由 take_alt_screen_switch 消费后触发 mark_all_dirty。
+                                    47 | 1047 | 1049 => self.alt_screen_switch = true,
+                                    _ => {}
                                 }
                             }
                         }

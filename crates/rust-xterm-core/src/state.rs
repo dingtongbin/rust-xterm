@@ -21,6 +21,10 @@ pub struct RuntimeState {
     cursor_blinking: bool,
     /// 上次已渲染的 seqno
     last_rendered_seqno: u64,
+    /// 上次渲染时光标的位置 (x, y)，用于检测 cursor 移动并标记老位置脏
+    pub last_cursor_pos: Option<(u32, u32)>,
+    /// 上次渲染时光标的可见性（已应用闪烁相位），用于检测 visible 翻转
+    pub last_cursor_visible: Option<bool>,
 }
 
 impl RuntimeState {
@@ -33,6 +37,8 @@ impl RuntimeState {
             cursor_blink_visible: true,
             cursor_blinking: false,
             last_rendered_seqno: 0,
+            last_cursor_pos: None,
+            last_cursor_visible: None,
         }
     }
 

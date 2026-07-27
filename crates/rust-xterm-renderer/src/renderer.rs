@@ -104,6 +104,17 @@ pub struct RendererConfig {
     /// cell.width 布局权威：连字字形不改变 cell 宽度，仅在 cell 宽度内
     /// 调整字形绘制位置。
     pub enable_ligatures: bool,
+    /// HiDPI 缩放因子（默认 1.0）
+    ///
+    /// 用于 HiDPI 显示器：将 `metrics` 中的 cell_width / cell_height /
+    /// baseline / font_size 按此因子放大，缓存到 [`Renderer::scaled_metrics`]，
+    /// 使字符物理分辨率与显示矩形物理像素 1:1。
+    ///
+    /// - `1.0`：不放大（标准 DPI）
+    /// - `2.0`：retina 等比放大（cell_w/cell_h/font_size 翻倍）
+    ///
+    /// 运行时可通过 [`Renderer::set_scale_factor`] 动态调整。
+    pub scale_factor: f32,
 }
 
 impl Default for RendererConfig {
@@ -117,7 +128,26 @@ impl Default for RendererConfig {
             default_fg: Color::WHITE,
             default_bg: Color::BLACK,
             enable_ligatures: true,
+            scale_factor: 1.0,
         }
+    }
+}
+
+/// 根据 `config.scale_factor` 与 `config.metrics` 计算缩放后的 [`RenderMetrics`]
+///
+/// 将 cell_width / cell_height / baseline / font_size 按scale_factor 等比放大，
+/// dpi 保持原值（dpi 是显示器的物理属性，不随渲染缩放变化）。
+///
+/// 用于 HiDPI：scale_factor=2.0 时 cell_w/cell_h/font_size 翻倍，
+/// 使字符物理分辨率与显示矩形物理像素 1:1。
+fn compute_scaled_metrics(config: &RendererConfig) -> RenderMetrics {
+    let s = config.scale_factor;
+    RenderMetrics {
+        cell_width: ((config.metrics.cell_width as f32) * s) as u32,
+        cell_height: ((config.metrics.cell_height as f32) * s) as u32,
+        baseline: ((config.metrics.baseline as f32) * s) as u32,
+        dpi: config.metrics.dpi,
+        font_size: config.metrics.font_size * s,
     }
 }
 
@@ -149,6 +179,14 @@ pub struct Renderer {
     font_tree: FontTree,
     /// 像素画布
     canvas: Canvas,
+    /// 缩放后的渲染度量（基于 `config.scale_factor` 放大 `config.metrics`）
+    ///
+    /// 所有渲染逻辑（render_row / render_row_segment / render_cursor 等）
+    /// 使用此度量而非 `config.metrics`，使 HiDPI 下字符物理分辨率与显示矩形
+    /// 物理像素 1:1。由 [`compute_scaled_metrics`] 计算，[`Renderer::new`] /
+    /// [`Renderer::with_global_atlas`] / [`Renderer::set_scale_factor`] /
+    /// [`Renderer::resize`] 在 scale_factor 或 cell 尺寸变化时刷新。
+    scaled_metrics: RenderMetrics,
     /// 渲染统计
     stats: RenderStats,
 }
@@ -174,10 +212,14 @@ impl Renderer {
         // - 彩色 emoji 的 RGBA 原色（sample_rgba 直接取色，跳过前景色混合）
         let atlas = TextureAtlas::new(config.atlas_width, config.atlas_height, 4, 1024);
         let canvas = Canvas::new(config.canvas_width, config.canvas_height, PixelFormat::Rgba);
+        // HiDPI：根据 scale_factor 放大 cell_w/cell_h/baseline/font_size，
+        // 后续所有渲染逻辑使用 scaled_metrics 而非 config.metrics。
+        let scaled_metrics = compute_scaled_metrics(&config);
         let mut font_tree = FontTree::new();
         // 整形字号与渲染度量一致，使 shape_run 产出的 advance 与
         // 光栅化后的字形宽度匹配（连字字形居中于 cell 宽度内时用到）。
-        font_tree.set_shape_size(config.metrics.font_size);
+        // 使用 scaled font_size，使 HiDPI 下整形 advance 与放大后的字形匹配。
+        font_tree.set_shape_size(scaled_metrics.font_size);
 
         Self {
             config,
@@ -185,6 +227,7 @@ impl Renderer {
             global_atlas: None,
             font_tree,
             canvas,
+            scaled_metrics,
             stats: RenderStats::default(),
         }
     }
@@ -206,8 +249,10 @@ impl Renderer {
     pub fn with_global_atlas(config: RendererConfig) -> Self {
         let global = global_atlas().get_or_init(config.clone());
         let canvas = Canvas::new(config.canvas_width, config.canvas_height, PixelFormat::Rgba);
+        // HiDPI：与 Renderer::new 一致，按 scale_factor 计算 scaled_metrics
+        let scaled_metrics = compute_scaled_metrics(&config);
         let mut font_tree = FontTree::new();
-        font_tree.set_shape_size(config.metrics.font_size);
+        font_tree.set_shape_size(scaled_metrics.font_size);
         // global atlas 共享，per-instance 仅作占位（实际查询走 global）
         Self {
             config,
@@ -215,6 +260,7 @@ impl Renderer {
             global_atlas: Some(global),
             font_tree,
             canvas,
+            scaled_metrics,
             stats: RenderStats::default(),
         }
     }
@@ -268,7 +314,7 @@ impl Renderer {
     /// 调用 `FontTree::shape_run`，再按 cluster 映射回 cell 渲染。
     /// 否则回退到 `render_cell_text` 单字符路径。
     pub fn render_row(&mut self, row: u32, cells: &[RustXtermCell]) -> (u32, u32, u32, u32) {
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let y = row * metrics.cell_height;
         let max_width = self.canvas.width();
 
@@ -366,7 +412,7 @@ impl Renderer {
         col_end: usize,
         cells: &[RustXtermCell],
     ) -> (u32, u32, u32, u32) {
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let y = row * metrics.cell_height;
         let max_width = self.canvas.width();
         let row_len = cells.len();
@@ -647,7 +693,7 @@ impl Renderer {
         };
 
         // 4. 按 cluster 映射回 cell 并合成
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let fg = if run_cells[0].flags.contains(CellFlags::REVERSE) {
             run_cells[0].bg
         } else {
@@ -788,7 +834,7 @@ impl Renderer {
             composite_glyph_into(
                 &mut self.canvas,
                 &guard,
-                self.config.metrics,
+                self.scaled_metrics,
                 x,
                 y,
                 entry,
@@ -845,7 +891,7 @@ impl Renderer {
     /// 当 `lookup_glyph` 返回 `glyph_id == 0`（所有字体都未覆盖该字符）时调用。
     /// 用前景色在 cell 内画一个略小于 cell 的实心方块，提示缺字。
     fn render_missing_glyph_box(&mut self, x: u32, y: u32, cell: &RustXtermCell) {
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let cell_w = (cell.width as u32) * metrics.cell_width;
         let cell_h = metrics.cell_height;
 
@@ -893,7 +939,7 @@ impl Renderer {
         face_id: fontdb::ID,
         is_color: bool,
     ) -> Option<RasterizedGlyph> {
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let ppem = metrics.font_size;
 
         // 获取字体数据
@@ -984,7 +1030,7 @@ impl Renderer {
         composite_glyph_into(
             &mut self.canvas,
             &self.atlas,
-            self.config.metrics,
+            self.scaled_metrics,
             x,
             y,
             entry,
@@ -995,7 +1041,7 @@ impl Renderer {
 
     /// 渲染装饰（下划线、删除线、波浪线等）
     fn render_decorations(&mut self, x: u32, y: u32, cell: &RustXtermCell) {
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let cell_w = (cell.width as u32) * metrics.cell_width;
         let cell_h = metrics.cell_height;
 
@@ -1062,7 +1108,7 @@ impl Renderer {
             return;
         }
 
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let x = cursor.x as u32 * metrics.cell_width;
         let y = cursor.y as u32 * metrics.cell_height;
 
@@ -1101,6 +1147,131 @@ impl Renderer {
         }
     }
 
+    /// 渲染选区高亮
+    ///
+    /// 对选区覆盖的 cell 反相绘制：原 (fg, bg) → 绘制时 fg=bg, bg=fg。
+    /// 线性选区：start..end 跨行，首行从 start.col 开始，末行到 end.col 结束，中间行全行。
+    /// 矩形选区：每行从 min(start.col, end.col) 到 max(start.col, end.col)。
+    ///
+    /// snapshot_rows 为当前屏幕快照（来自 manager.screen_snapshot().rows）。
+    /// 选区超出 canvas 范围的行列会跳过。
+    pub fn render_selection(
+        &mut self,
+        selection: &rust_xterm_core::SelectionRange,
+        snapshot_rows: &[Vec<rust_xterm_core::RustXtermCell>],
+    ) {
+        let metrics = self.scaled_metrics;
+        let cell_w = metrics.cell_width;
+        let cell_h = metrics.cell_height;
+        let canvas_w = self.canvas.width();
+        let canvas_h = self.canvas.height();
+
+        if selection.rectangular {
+            // 矩形选区：每行独立处理，列范围 = [min_col, max_col]
+            let min_row = selection.start.0.min(selection.end.0);
+            let max_row = selection.start.0.max(selection.end.0);
+            let min_col = selection.start.1.min(selection.end.1);
+            let max_col = selection.start.1.max(selection.end.1);
+
+            for (row, row_cells) in snapshot_rows
+                .iter()
+                .enumerate()
+                .take(max_row.saturating_add(1))
+                .skip(min_row)
+            {
+                for (col, cell) in row_cells
+                    .iter()
+                    .enumerate()
+                    .take(max_col.saturating_add(1))
+                    .skip(min_col)
+                {
+                    let px = (col as u32) * cell_w;
+                    let py = (row as u32) * cell_h;
+                    // 跳过超出 canvas 范围的 cell
+                    if px + cell_w > canvas_w || py + cell_h > canvas_h {
+                        continue;
+                    }
+                    self.render_inverted_cell(px, py, cell);
+                }
+            }
+        } else {
+            // 线性选区：标准化 start/end 顺序（按 (row, col) 字典序）
+            let (start, end) =
+                if (selection.start.0, selection.start.1) <= (selection.end.0, selection.end.1) {
+                    (selection.start, selection.end)
+                } else {
+                    (selection.end, selection.start)
+                };
+            let (start_row, start_col) = start;
+            let (end_row, end_col) = end;
+
+            for (row, row_cells) in snapshot_rows
+                .iter()
+                .enumerate()
+                .take(end_row.saturating_add(1))
+                .skip(start_row)
+            {
+                let row_len = row_cells.len();
+                // 首行从 start_col 开始；中间行从 0 开始
+                let col_start = if row == start_row { start_col } else { 0 };
+                // 末行到 end_col 结束（含）；中间行到行末
+                let col_end = if row == end_row {
+                    end_col.saturating_add(1)
+                } else {
+                    row_len
+                };
+
+                for (col, cell) in row_cells.iter().enumerate().take(col_end).skip(col_start) {
+                    let px = (col as u32) * cell_w;
+                    let py = (row as u32) * cell_h;
+                    // 跳过超出 canvas 范围的 cell
+                    if px + cell_w > canvas_w || py + cell_h > canvas_h {
+                        continue;
+                    }
+                    self.render_inverted_cell(px, py, cell);
+                }
+            }
+        }
+
+        self.stats.composites += 1;
+    }
+
+    /// 渲染反相 cell（选区高亮内部使用）
+    ///
+    /// 将 cell 的显示色 (fg, bg) 互换后绘制：
+    /// - 用 fill_rect 填充原显示 fg 作为新背景
+    /// - 复用 [`render_cell_text`](Self::render_cell_text) 路径，用原显示 bg 作为新前景合成字形
+    ///
+    /// 通过克隆 cell 并交换 fg/bg 实现，保留原 flags（REVERSE 由 render_cell_text
+    /// 内部处理），确保反相结果与原显示一致地取反。
+    fn render_inverted_cell(&mut self, x: u32, y: u32, cell: &RustXtermCell) {
+        let metrics = self.scaled_metrics;
+
+        // 反相：交换 fg/bg（保留原 flags，REVERSE 由 render_cell_text 内部处理）
+        let mut inverted = cell.clone();
+        std::mem::swap(&mut inverted.fg, &mut inverted.bg);
+
+        // 填充反相背景（与 render_row 一致的 bg 选取逻辑，使用 cell_width 覆盖整个网格单元）
+        let bg = if inverted.flags.contains(CellFlags::REVERSE) {
+            inverted.fg
+        } else {
+            inverted.bg
+        };
+        self.canvas.fill_rect(
+            x,
+            y,
+            metrics.cell_width,
+            metrics.cell_height,
+            bg.r,
+            bg.g,
+            bg.b,
+            bg.a,
+        );
+
+        // 合成反相前景字形（复用 render_cell_text 路径：atlas 查询/光栅化/缺字处理）
+        self.render_cell_text(x, y, &inverted);
+    }
+
     /// 渲染 IME 预编辑文本（composition）
     ///
     /// 在 cursor 行的 cursor 列之后绘制带下划线的预编辑文本。
@@ -1110,7 +1281,7 @@ impl Renderer {
         if text.is_empty() {
             return;
         }
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let base_x = cursor.x as u32 * metrics.cell_width;
         let y = cursor.y as u32 * metrics.cell_height;
         let max_width = self.canvas.width();
@@ -1144,7 +1315,7 @@ impl Renderer {
         };
         if glyph_info.glyph_id == 0 {
             // 缺字：画方块占位
-            let metrics = self.config.metrics;
+            let metrics = self.scaled_metrics;
             self.canvas.fill_rect(
                 x,
                 y,
@@ -1229,7 +1400,7 @@ impl Renderer {
     ///
     /// 宿主层应在每帧遍历 `manager.images().placements()` 调用本方法。
     pub fn render_image(&mut self, placement: &ImagePlacement) {
-        let metrics = self.config.metrics;
+        let metrics = self.scaled_metrics;
         let base_x = placement.col as u32 * metrics.cell_width;
         let base_y = placement.row as u32 * metrics.cell_height;
         let canvas_w = self.canvas.width();
@@ -1270,15 +1441,66 @@ impl Renderer {
     }
 
     /// 调整画布大小
+    ///
+    /// 更新 canvas 缓冲区与 `config.canvas_width/height`。
+    /// 若检测到 `scale_factor` 或 cell 尺寸与当前 `scaled_metrics` 不一致
+    /// （例如外部已通过 [`set_scale_factor`](Self::set_scale_factor) 调整过），
+    /// 重新计算 `scaled_metrics` 并清空 `glyph_cache` / `run_cache`
+    /// （位于 `atlas` 内部的 `dynamic_cache` 与 `run_cache`），
+    /// 同时同步刷新 `font_tree.shape_size`，避免命中错误 scale 的缓存字形。
     pub fn resize(&mut self, width: u32, height: u32) {
         self.canvas.resize(width, height);
         self.config.canvas_width = width;
         self.config.canvas_height = height;
+        // 检测 scale_factor 或 cell 尺寸是否与当前 scaled_metrics 不一致
+        let fresh = compute_scaled_metrics(&self.config);
+        if fresh.cell_width != self.scaled_metrics.cell_width
+            || fresh.cell_height != self.scaled_metrics.cell_height
+            || fresh.baseline != self.scaled_metrics.baseline
+            || fresh.font_size != self.scaled_metrics.font_size
+        {
+            self.apply_scaled_metrics(fresh);
+        }
+    }
+
+    /// 设置 HiDPI 缩放因子
+    ///
+    /// 供 demo 在窗口 resize 时动态调整 scale。内部：
+    /// 1. 更新 `config.scale_factor`
+    /// 2. 重新计算 `scaled_metrics`
+    /// 3. 同步 `font_tree.shape_size` 为 scaled font_size
+    /// 4. 清空 `glyph_cache` 与 `run_cache`（位于 `atlas` 内部，
+    ///    若挂载了 `global_atlas` 也一并清空）
+    ///
+    /// 清空缓存是必要的：旧缓存字形按旧 scale 光栅化，命中后会以错误尺寸合成。
+    pub fn set_scale_factor(&mut self, scale: f32) {
+        self.config.scale_factor = scale;
+        let fresh = compute_scaled_metrics(&self.config);
+        self.apply_scaled_metrics(fresh);
+    }
+
+    /// 应用新的 scaled_metrics 并清空缓存
+    ///
+    /// 由 [`resize`](Self::resize) 与 [`set_scale_factor`](Self::set_scale_factor)
+    /// 共享：更新 `scaled_metrics` / `font_tree.shape_size`，并清空
+    /// per-instance `atlas` 与（若挂载）`global_atlas` 的 dynamic 区
+    /// （`glyph_cache` + `run_cache`），避免命中旧 scale 的字形。
+    fn apply_scaled_metrics(&mut self, fresh: RenderMetrics) {
+        self.scaled_metrics = fresh;
+        self.font_tree.set_shape_size(fresh.font_size);
+        // 清空 per-instance glyph_cache 与 run_cache（atlas.clear_dynamic 同时清两者）
+        self.atlas.clear_dynamic();
+        // 若挂载了 global_atlas，同样清空（共享 atlas 中的旧 scale 字形也需失效）
+        if let Some(global) = self.global_atlas.as_ref().cloned() {
+            if let Ok(mut guard) = global.lock() {
+                guard.clear_dynamic();
+            }
+        }
     }
 
     /// 获取渲染度量
     pub fn metrics(&self) -> RenderMetrics {
-        self.config.metrics
+        self.scaled_metrics
     }
 }
 
@@ -1441,6 +1663,83 @@ mod tests {
         let renderer = Renderer::new(RendererConfig::default());
         assert_eq!(renderer.canvas().width(), 640);
         assert_eq!(renderer.canvas().height(), 384);
+    }
+
+    /// SubTask 1.5: scale_factor=2.0 应将默认 metrics (8/16/14.0) 等比放大
+    ///
+    /// 验证 `Renderer::new` 中根据 `config.scale_factor` 计算并缓存的
+    /// `scaled_metrics`：cell_width / cell_height / font_size 均翻倍。
+    ///
+    /// 默认 `RenderMetrics { cell_width: 8, cell_height: 16, font_size: 14.0 }`，
+    /// scale_factor=2.0 期望：
+    /// - cell_width = 8 * 2.0 = 16
+    /// - cell_height = 16 * 2.0 = 32
+    /// - font_size = 14.0 * 2.0 = 28.0
+    ///
+    /// 注：任务描述中预期 font_size=32.0 系笔误（14.0 * 2.0 = 28.0，
+    /// 非 32.0；32.0 = 16 * 2.0 对应 cell_height）。本测试断言正确的
+    /// 等比放大值 28.0。
+    #[test]
+    fn scale_factor_doubles_metrics() {
+        let config = RendererConfig {
+            scale_factor: 2.0,
+            ..Default::default()
+        };
+        let renderer = Renderer::new(config);
+        let m = renderer.metrics();
+        assert_eq!(m.cell_width, 16, "scaled cell_width 应为 8 * 2.0 = 16");
+        assert_eq!(m.cell_height, 32, "scaled cell_height 应为 16 * 2.0 = 32");
+        assert_eq!(m.font_size, 28.0, "scaled font_size 应为 14.0 * 2.0 = 28.0");
+        // baseline 也应等比放大：13 * 2.0 = 26
+        assert_eq!(m.baseline, 26, "scaled baseline 应为 13 * 2.0 = 26");
+    }
+
+    /// SubTask 1.4: set_scale_factor 动态调整应刷新 scaled_metrics
+    ///
+    /// 构造默认 Renderer（scale=1.0），调用 set_scale_factor(2.0) 后
+    /// `metrics()` 应返回翻倍后的值。
+    #[test]
+    fn set_scale_factor_updates_metrics() {
+        let mut renderer = Renderer::new(RendererConfig::default());
+        // 初始 scale=1.0：与默认 metrics 一致
+        let m0 = renderer.metrics();
+        assert_eq!(m0.cell_width, 8);
+        assert_eq!(m0.cell_height, 16);
+        assert_eq!(m0.font_size, 14.0);
+
+        // 动态调整为 2.0
+        renderer.set_scale_factor(2.0);
+        let m1 = renderer.metrics();
+        assert_eq!(
+            m1.cell_width, 16,
+            "set_scale_factor(2.0) 后 cell_width 应翻倍"
+        );
+        assert_eq!(
+            m1.cell_height, 32,
+            "set_scale_factor(2.0) 后 cell_height 应翻倍"
+        );
+        assert_eq!(
+            m1.font_size, 28.0,
+            "set_scale_factor(2.0) 后 font_size 应翻倍"
+        );
+    }
+
+    /// SubTask 1.3: scale_factor=1.0 时 resize 不应触发缓存清理
+    ///
+    /// 默认 Renderer（scale=1.0）调用 resize，scaled_metrics 未变，
+    /// apply_scaled_metrics 不应被触发（这里仅验证不 panic 且 metrics 不变）。
+    #[test]
+    fn resize_keeps_metrics_when_scale_unchanged() {
+        let mut renderer = Renderer::new(RendererConfig::default());
+        let m_before = renderer.metrics();
+        renderer.resize(800, 600);
+        let m_after = renderer.metrics();
+        assert_eq!(m_after.cell_width, m_before.cell_width);
+        assert_eq!(m_after.cell_height, m_before.cell_height);
+        assert_eq!(m_after.font_size, m_before.font_size);
+        // canvas 尺寸应更新
+        assert_eq!(renderer.canvas().width(), 800);
+        assert_eq!(renderer.canvas().height(), 600);
     }
 
     #[test]
@@ -2182,5 +2481,114 @@ mod tests {
             "r2 渲染 'X' 应命中 r1 插入到 global atlas 的条目，atlas_hits={}",
             r2_stats.atlas_hits
         );
+    }
+
+    /// Task 3: 线性选区反相渲染
+    ///
+    /// 5x5 cells（'A'，fg=WHITE，bg=BLACK），线性选区 (0,1)..(2,3)。
+    /// 验证被选 cell 的背景反相为白色（原 fg），不再是原背景黑色。
+    #[test]
+    fn render_selection_linear_inverts() {
+        use rust_xterm_core::SelectionRange;
+        let mut renderer = Renderer::new(RendererConfig::default());
+        renderer.clear();
+        // 准备 5x5 cells，每 cell 包含字符 'A'，fg=WHITE，bg=BLACK
+        let cells: Vec<Vec<RustXtermCell>> = (0..5)
+            .map(|_| {
+                (0..5)
+                    .map(|_| {
+                        let mut c = RustXtermCell::blank();
+                        c.text = "A".to_string();
+                        c.fg = Color::WHITE;
+                        c.bg = Color::BLACK;
+                        c
+                    })
+                    .collect()
+            })
+            .collect();
+        // 线性选区 (0,1)..(2,3)
+        let sel = SelectionRange::linear((0, 1), (2, 3));
+        renderer.render_selection(&sel, &cells);
+        // 验证被选 cell 的像素被改变（不再是纯 bg）
+        let canvas = renderer.canvas();
+        let cw = renderer.metrics().cell_width;
+        let ch = renderer.metrics().cell_height;
+        // (col=2, row=1) 应被反相绘制（原 bg=BLACK，反相后 bg=WHITE，像素非黑）
+        let (r, g, b, _) = canvas.get_pixel(2 * cw + cw / 2, ch + ch / 2);
+        // 反相后背景应为白色 (255,255,255,255)
+        assert!(
+            r > 200 && g > 200 && b > 200,
+            "被选 cell 背景应反相为白色，实际 ({r},{g},{b})"
+        );
+    }
+
+    /// Task 3: 矩形选区反相渲染
+    ///
+    /// 5x5 cells，矩形选区 (0,1)..(2,3)。验证：
+    /// - 选区外 (col=0, row=0) 保持原黑色背景
+    /// - 选区内 (col=2, row=1) 反相为白色背景
+    #[test]
+    fn render_selection_rectangular_inverts() {
+        use rust_xterm_core::SelectionRange;
+        let mut renderer = Renderer::new(RendererConfig::default());
+        renderer.clear();
+        let cells: Vec<Vec<RustXtermCell>> = (0..5)
+            .map(|_| {
+                (0..5)
+                    .map(|_| {
+                        let mut c = RustXtermCell::blank();
+                        c.text = "A".to_string();
+                        c.fg = Color::WHITE;
+                        c.bg = Color::BLACK;
+                        c
+                    })
+                    .collect()
+            })
+            .collect();
+        // 矩形选区 (0,1)..(2,3)
+        let sel = SelectionRange::rectangular((0, 1), (2, 3));
+        renderer.render_selection(&sel, &cells);
+        let canvas = renderer.canvas();
+        let cw = renderer.metrics().cell_width;
+        let ch = renderer.metrics().cell_height;
+        // 矩形选区外 (col=0, row=0) 应保持原样（黑色背景）
+        let (r, g, b, _) = canvas.get_pixel(0, 0);
+        assert!(
+            r < 50 && g < 50 && b < 50,
+            "选区外应保持黑色背景，实际 ({r},{g},{b})"
+        );
+        // 矩形选区内 (col=2, row=1) 应被反相
+        let (r, _, _, _) = canvas.get_pixel(2 * cw + cw / 2, ch + ch / 2);
+        assert!(r > 200, "矩形选区内应反相为白色背景，实际 R={r}");
+    }
+
+    /// Task 3: 空选区不 panic
+    ///
+    /// cells 为含一个空行的快照，选区 (0,0)..(0,0) 不应 panic。
+    #[test]
+    fn render_selection_empty_does_not_panic() {
+        use rust_xterm_core::SelectionRange;
+        let mut renderer = Renderer::new(RendererConfig::default());
+        let cells: Vec<Vec<RustXtermCell>> = vec![vec![]];
+        // 空选区不 panic
+        let sel = SelectionRange::linear((0, 0), (0, 0));
+        renderer.render_selection(&sel, &cells);
+    }
+
+    /// Task 3: 选区超出 canvas 范围时跳过，不 panic
+    ///
+    /// 2x2 cells，选区 (0,0)..(10,10) 远超 canvas，应跳过越界行列。
+    #[test]
+    fn render_selection_out_of_bounds_skips() {
+        use rust_xterm_core::SelectionRange;
+        let mut renderer = Renderer::new(RendererConfig::default());
+        renderer.clear();
+        let cells: Vec<Vec<RustXtermCell>> = (0..2)
+            .map(|_| (0..2).map(|_| RustXtermCell::blank()).collect())
+            .collect();
+        // 选区超出 canvas 范围
+        let sel = SelectionRange::linear((0, 0), (10, 10));
+        renderer.render_selection(&sel, &cells);
+        // 不 panic 即通过
     }
 }
