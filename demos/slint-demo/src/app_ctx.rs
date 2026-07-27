@@ -22,6 +22,14 @@ pub(crate) struct AppCtx {
     pub(crate) pty_alive: bool,
     /// 当前键盘修饰键状态（由 key-pressed 回调维护，供 mouse 回调读取）
     pub(crate) current_mods: KeyMods,
+    /// 上一次光标可见性（用于检测闪烁/移动，触发像素上传）
+    pub(crate) last_cursor_visible: Option<bool>,
+    /// 状态栏文本 dirty 检查缓存
+    pub(crate) last_fps_text: Option<String>,
+    pub(crate) last_mem_text: Option<String>,
+    pub(crate) last_scroll_text: Option<String>,
+    /// 上一次检测到的窗口物理像素尺寸（用于实时 resize 同步）
+    pub(crate) last_window_size: (u32, u32),
 }
 
 impl AppCtx {
@@ -35,13 +43,18 @@ impl AppCtx {
             event_loop,
             renderer,
             fps_tracker: FpsTracker::new(),
-            sys: sysinfo::System::new_all(),
+            sys: sysinfo::System::new(),
             pid,
             last_mem_refresh: Instant::now(),
             last_mem_mb: 0.0,
             scroll_offset: 0,
             pty_alive,
             current_mods: KeyMods::default(),
+            last_cursor_visible: None,
+            last_fps_text: None,
+            last_mem_text: None,
+            last_scroll_text: None,
+            last_window_size: (0, 0),
         }
     }
 }

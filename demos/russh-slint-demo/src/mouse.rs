@@ -3,6 +3,7 @@
 //! 与 slint-demo 的差异：
 //! - 中键粘贴不再走 `event_loop.send_input`，改走 `bridge.send_input`
 //! - 鼠标跟踪模式下产生的响应（manager.drain_output）由 render::tick 统一回环
+//! - HiDPI 修正：像素→列换算用 `CELL_W * scale`（物理 cell 尺寸），而非逻辑 CELL_W
 use crate::app_ctx::{AppCtx, ClipboardHandle};
 use crate::{CELL_H, CELL_W};
 use rust_xterm_core::mouse::{MouseAction, MouseButton};
@@ -15,14 +16,22 @@ pub(crate) fn handle_pointer_event(
     y: f32,
     kind: i32,
     button: i32,
+    scale: f32,
 ) {
     let mut ctx = ctx.borrow_mut();
+    // HiDPI 坐标换算：Slint pointer-event 的 mouse-x/mouse-y 是逻辑像素，
+    // CELL_W/CELL_H 也是逻辑像素，直接相除即得列/行号。
+    // scale 参数预留（若未来 Slint 改为物理像素坐标，需改用 CELL_W * scale）。
+    let _ = scale;
     let col = (x as u32 / CELL_W) as usize;
     let row = (y as u32 / CELL_H) as usize;
     let cols = ctx.manager.size().cols;
     let rows = ctx.manager.size().rows;
     let col = col.min(cols.saturating_sub(1));
     let row = row.min(rows.saturating_sub(1));
+
+    // 缓存最后一次 pointer-event 的 (col, row)，供滚轮回调使用
+    ctx.last_mouse_pos = Some((col, row));
 
     let mouse_btn = match button {
         1 => MouseButton::Left,

@@ -12,8 +12,10 @@
 
 export component App inherits Window {
     title: "rust-xterm russh SSH Demo";
-    preferred-width: 800px;
-    preferred-height: 600px;
+    preferred-width: 1000px;
+    preferred-height: 640px;
+    min-width: 400px;
+    min-height: 300px;
     background: #000000;
 
     // ---- Rust ↔ Slint 属性 ----
@@ -22,6 +24,9 @@ export component App inherits Window {
     in-out property <string> mem-text: "Mem: -- MB";
     in-out property <string> scroll-text: "Scroll: 0";
     in-out property <string> ssh-text: "SSH: idle";
+    // 滚动条状态：scroll-offset = 当前偏移（0 = 最新），scroll-max = 最大 scrollback
+    in-out property <int> scroll-offset: 0;
+    in-out property <int> scroll-max: 0;
 
     // 连接状态机
     //   connecting=true  → 显示遮罩，遮罩文字 = status-text
@@ -35,6 +40,8 @@ export component App inherits Window {
     callback key-pressed-cb(string, bool, bool, bool);
     callback pointer-event-cb(float, float, int, int);
     callback scroll-cb(float);
+    // ScrollBar 拖拽/点击 → 通知 Rust 更新 scroll_offset（Slint 1.6 无 on_property_changed，用自定义回调替代）
+    callback scroll-to(float);
 
     forward-focus: key-handler;
 
@@ -49,7 +56,7 @@ export component App inherits Window {
             img := Image {
                 x: 0px;
                 y: 0px;
-                width: 100%;
+                width: parent.width - 12px;
                 height: 100%;
                 source: terminal-image;
                 image-fit: contain;
@@ -71,6 +78,58 @@ export component App inherits Window {
                 scroll-event(e) => {
                     scroll-cb(e.delta-y / 1px);
                     accept
+                }
+            }
+
+            // ---- 右侧垂直滚动条（手动实现，Slint 1.6 无内置 ScrollBar） ----
+            Rectangle {
+                x: parent.width - 12px;
+                y: 0px;
+                width: 12px;
+                height: 100%;
+                background: #1a1a1a;
+
+                // 拖拽/点击区域：覆盖整个滚动条宽度（12px），便于点击
+                bar-touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    pointer-event(e) => {
+                        // 按下或拖动时：根据鼠标 Y 位置计算新 offset 并通知 Rust
+                        if (e.kind == PointerEventKind.down
+                             || (e.kind == PointerEventKind.move && self.pressed)) {
+                            if (scroll-max > 0) {
+                                // mouse-y ∈ [0, parent.height] → ratio ∈ [0, 1]
+                                // scroll-offset = 0 表示最新（底部），scroll-max 表示最旧（顶部）
+                                // 故 offset = scroll-max * (1 - ratio)
+                                scroll-to(scroll-max * (1.0 - (self.mouse-y / 1px) / (parent.height / 1px)))
+                            }
+                        }
+                    }
+                }
+
+                // track
+                Rectangle {
+                    x: 4px;
+                    y: 0px;
+                    width: 4px;
+                    height: 100%;
+                    background: #2a2a2a;
+                    border-radius: 2px;
+
+                    // thumb
+                    thumb := Rectangle {
+                        x: 0px;
+                        width: 100%;
+                        height: scroll-max > 0
+                            ? max(parent.height * 0.1, 20px)
+                            : 0px;
+                        y: scroll-max > 0
+                            ? (parent.height - self.height) * (1.0 - scroll-offset * 1.0 / max(scroll-max, 1))
+                            : 0px;
+                        background: #6a6a6a;
+                        border-radius: 2px;
+                    }
                 }
             }
         }

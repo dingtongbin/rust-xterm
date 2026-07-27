@@ -259,7 +259,15 @@ impl TerminalManager {
             }
         }
 
-        // 8. 触发事件（xterm.js 风格）
+        // 8. 检测 alt screen 切换（DECSET/DECRST 47/1047/1049）
+        //    WezTerm 内部会切换 primary/alternate buffer 但不暴露"全屏脏"信号，
+        //    需在脏区提取前主动 mark_all_dirty，确保退出 htop 等程序时
+        //    残留画面被全屏重绘。mark_dirty 不触发事件，故放在 emit_state_events 之前。
+        if self.core.take_alt_screen_switch() {
+            self.damage.mark_all_dirty();
+        }
+
+        // 9. 触发事件（xterm.js 风格）
         self.emit_state_events(before_cursor);
     }
 
@@ -555,7 +563,26 @@ impl TerminalManager {
     /// - `now`：当前时间戳
     pub fn poll_frame(&mut self, now: Instant) -> Option<FrameUpdate> {
         // 懒检查（在 advance_blink 之前检查，否则 last_blink 会被更新导致永远 false）
-        let has_damage = !self.damage.is_empty();
+        let mut has_damage = !self.damage.is_empty();
+
+        // Task: cursor 移动检测——读取当前 cursor，与上次记录的位置/可见性比较。
+        // 若位置变化，把老位置行与新位置行都标脏，确保上一帧的 cursor 像素被擦除；
+        // 若可见性变化（如闪烁翻转），把 cursor 行标脏。首帧（None）不做比较。
+        let cursor_now = self.core.cursor_meta();
+        if let Some((last_x, last_y)) = self.state.last_cursor_pos {
+            if last_x as usize != cursor_now.x || last_y as usize != cursor_now.y {
+                self.damage.mark_dirty(last_y as usize);
+                self.damage.mark_dirty(cursor_now.y);
+                has_damage = true;
+            }
+        }
+        if let Some(last_visible) = self.state.last_cursor_visible {
+            if last_visible != cursor_now.visible {
+                self.damage.mark_dirty(cursor_now.y);
+                has_damage = true;
+            }
+        }
+
         let blink_due = self.state.blink_due(now);
 
         if !has_damage && !blink_due {
@@ -579,6 +606,13 @@ impl TerminalManager {
         if self.composition.is_some() {
             let cursor = self.core.cursor_meta();
             self.damage.mark_dirty(cursor.y);
+        }
+
+        // Task: 在 has_damage 为真时（无论 cursor 是否移动），无条件把 cursor 行标脏，
+        // 确保 cursor 像素在每次有变更的帧中都被重绘。此步在 blink_due 检查之后、
+        // drain_spans 之前执行。
+        if has_damage {
+            self.damage.mark_dirty(cursor_now.y);
         }
 
         // 提取脏 span（行级 + 列级）
@@ -643,6 +677,11 @@ impl TerminalManager {
 
         // 记录渲染
         self.state.mark_rendered(now, seqno);
+
+        // Task: 更新 last_cursor_pos/visible（在 cursor.visible 被闪烁覆盖之后），
+        // 下一帧 poll_frame 据此检测 cursor 移动与可见性翻转。
+        self.state.last_cursor_pos = Some((cursor.x as u32, cursor.y as u32));
+        self.state.last_cursor_visible = Some(cursor.visible);
 
         Some(FrameUpdate {
             dirty_rects,
@@ -724,9 +763,14 @@ impl TerminalManager {
     ///
     /// 坐标 `x`/`y` 为当前可视窗口的 0-based 列/行。
     ///
-    /// - 若应用启用了鼠标跟踪模式（`is_mouse_grabbed` 为真），事件转发给 WezTerm，
-    ///   自动编码报告并写入捕获缓冲，下次 [`Self::drain_output`] 即可取出转发给 PTY。
-    /// - 否则，事件用于本地选区交互：左键单击/拖拽选词、双击选词、三击选行。
+    /// - 若应用启用了鼠标跟踪模式（`is_mouse_grabbed` 为真）且未按住 Shift，
+    ///   事件转发给 WezTerm，自动编码报告并写入捕获缓冲，
+    ///   下次 [`Self::drain_output`] 即可取出转发给 PTY。
+    /// - 否则（未启用鼠标跟踪，或按住 Shift 强制 bypass），事件用于本地选区交互：
+    ///   左键单击/拖拽选词、双击选词、三击选行。
+    ///
+    /// Shift bypass：即使远端程序启用了鼠标跟踪，用户按住 Shift 时仍走本地选区，
+    ///   与 xterm.js / iTerm2 / Windows Terminal 行为一致。
     pub fn mouse_event(
         &mut self,
         x: usize,
@@ -735,7 +779,7 @@ impl TerminalManager {
         button: MouseButton,
         mods: KeyMods,
     ) {
-        if self.core.is_mouse_grabbed() {
+        if self.core.is_mouse_grabbed() && !mods.shift {
             self.core.mouse_event(x, y, action, button, mods);
             return;
         }
@@ -904,6 +948,15 @@ impl TerminalManager {
     /// 状态由 [`Self::write`] 在数据流中扫描 DECSET 1004 序列维护。
     pub fn is_focus_reporting_enabled(&self) -> bool {
         self.core.is_focus_reporting_enabled()
+    }
+
+    /// 是否启用了 Application Cursor Keys 模式（DECSET 1）
+    ///
+    /// 当应用发送 `\x1b[?1h` 时启用，`\x1b[?1l` 时禁用。
+    /// 启用后方向键发送 SS3 序列（`\x1bOA` 等），否则发送 CSI 序列（`\x1b[A` 等）。
+    /// 状态由 [`Self::write`] 在数据流中扫描 DECSET 1 序列维护。
+    pub fn app_cursor_mode(&self) -> bool {
+        self.core.app_cursor_mode()
     }
 
     /// 通知终端焦点状态变化
@@ -1277,6 +1330,35 @@ mod tests {
         // 禁用 bracketed paste: ESC [ ? 2004 l
         mgr.write(b"\x1b[?2004l");
         assert!(!mgr.is_bracketed_paste_enabled(), "禁用后应返回 false");
+    }
+
+    /// SubTask 3.3：app_cursor_mode 默认为 false
+    #[test]
+    fn app_cursor_mode_default_false() {
+        let mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        assert!(
+            !mgr.app_cursor_mode(),
+            "默认 application cursor keys 模式应为 false"
+        );
+    }
+
+    /// SubTask 3.3：DECSET 1 / DECRST 1 序列应正确切换 app_cursor_mode
+    #[test]
+    fn app_cursor_mode_set_by_decset() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        assert!(!mgr.app_cursor_mode(), "初始应为 false");
+        // 启用 application cursor keys: ESC [ ? 1 h
+        mgr.write(b"\x1b[?1h");
+        assert!(
+            mgr.app_cursor_mode(),
+            "DECSET 1 后 app_cursor_mode 应为 true"
+        );
+        // 禁用 application cursor keys: ESC [ ? 1 l
+        mgr.write(b"\x1b[?1l");
+        assert!(
+            !mgr.app_cursor_mode(),
+            "DECRST 1 后 app_cursor_mode 应为 false"
+        );
     }
 
     /// Task 8: 验证 OSC 8 超链接被提取到 RustXtermCell.hyperlink
@@ -1966,5 +2048,119 @@ mod tests {
             assert_eq!(span.col_start, 0);
             assert!(span.col_end > 0);
         }
+    }
+
+    // ========================================================================
+    // Task 2: alt screen 切换强制全屏脏
+    // ========================================================================
+
+    /// DECRST 1049（退出 alt screen）后应 mark_all_dirty，且 dirty_spans 覆盖全屏
+    #[test]
+    fn alt_screen_exit_marks_all_dirty() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        // 先 drain 初始帧
+        let _ = mgr.poll_frame(Instant::now());
+        // 写入退出 alt screen 序列
+        mgr.write(b"\x1b[?1049l");
+        // damage 应非空
+        assert!(!mgr.damage().is_empty(), "DECRST 1049 后应 mark_all_dirty");
+        // poll_frame 后 dirty_spans 应覆盖全屏
+        let frame = mgr.poll_frame(Instant::now()).expect("frame");
+        let dirty_rows: std::collections::HashSet<_> =
+            frame.dirty_spans.iter().map(|s| s.row).collect();
+        for row in 0..5 {
+            assert!(dirty_rows.contains(&row), "row {row} 应在 dirty_spans 中");
+        }
+    }
+
+    /// DECSET 1049（进入 alt screen）后应 mark_all_dirty
+    #[test]
+    fn alt_screen_enter_marks_all_dirty() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        let _ = mgr.poll_frame(Instant::now());
+        mgr.write(b"\x1b[?1049h");
+        assert!(!mgr.damage().is_empty(), "DECSET 1049 后应 mark_all_dirty");
+    }
+
+    /// DECRST 47（旧式 alt screen 退出）也应触发
+    #[test]
+    fn alt_screen_47_also_triggers() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        let _ = mgr.poll_frame(Instant::now());
+        mgr.write(b"\x1b[?47l");
+        assert!(!mgr.damage().is_empty(), "DECRST 47 后应 mark_all_dirty");
+    }
+
+    /// DECRST 1047（旧式 alt screen 退出）也应触发
+    #[test]
+    fn alt_screen_1047_also_triggers() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        let _ = mgr.poll_frame(Instant::now());
+        mgr.write(b"\x1b[?1047l");
+        assert!(!mgr.damage().is_empty(), "DECRST 1047 后应 mark_all_dirty");
+    }
+
+    // ========================================================================
+    // Task: poll_frame 跟踪 cursor 移动并标记老位置脏
+    // ========================================================================
+
+    /// cursor 移动时，老位置行与新位置行都应在 dirty_spans 中
+    #[test]
+    fn poll_frame_marks_old_cursor_row_dirty() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        // 写入 "abc\r\n" 让 cursor 从 (3, 0) 移到 (0, 1)
+        mgr.write(b"abc\r\n");
+        let frame = mgr.poll_frame(Instant::now()).expect("frame");
+        // 应包含 row=0（老位置）和 row=1（新位置）
+        let dirty_rows: Vec<_> = frame.dirty_spans.iter().map(|s| s.row).collect();
+        assert!(
+            dirty_rows.contains(&0),
+            "老 cursor 行 (row=0) 应在 dirty_spans: {dirty_rows:?}"
+        );
+        assert!(
+            dirty_rows.contains(&1),
+            "新 cursor 行 (row=1) 应在 dirty_spans: {dirty_rows:?}"
+        );
+    }
+
+    /// 任何 damage 时，cursor 行都应在 dirty_spans 中
+    #[test]
+    fn poll_frame_marks_cursor_row_dirty_on_any_damage() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(5, 10));
+        // 先 drain 一次（构造时全屏脏）
+        let _ = mgr.poll_frame(Instant::now());
+        // 写入第二行（不影响 cursor 行的位置）
+        mgr.write(b"\nhello"); // 注意：\n 在 wezterm 中可能只移行不回车
+        let frame = mgr.poll_frame(Instant::now()).expect("frame");
+        // cursor 行应在 dirty_spans 中
+        let cursor = frame.cursor;
+        let dirty_rows: Vec<_> = frame.dirty_spans.iter().map(|s| s.row).collect();
+        assert!(
+            dirty_rows.contains(&cursor.y),
+            "cursor 行 {} 应在 dirty_spans: {:?}",
+            cursor.y,
+            dirty_rows
+        );
+    }
+
+    // ========================================================================
+    // Task 8: scrollback 默认 1000 行（内存优化）
+    // ========================================================================
+
+    /// Task 8: 默认 scrollback 应为 1000 行而非 3500
+    ///
+    /// 写入足够多行触发滚动后，max_scrollback 不应超过配置的 1000 行。
+    /// `max_scrollback()` 返回的是实际历史行数（scrollback_rows - physical_rows），
+    /// 因此需要先写入超过 1000 行的数据才会触达上限。
+    #[test]
+    fn scrollback_default_is_1000() {
+        let mut mgr = TerminalManager::utf8(TerminalSize::new(24, 80));
+        // 写入远超 1000 行的数据，触达 scrollback 上限
+        for i in 0..2000 {
+            mgr.write(format!("line{i}\r\n").as_bytes());
+        }
+        let max = mgr.max_scrollback();
+        assert!(max <= 1000, "默认 scrollback 应 ≤ 1000，实际 {max}");
+        assert!(max > 0, "写入数据后应已有 scrollback 历史");
     }
 }
